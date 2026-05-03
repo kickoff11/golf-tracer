@@ -9,6 +9,7 @@ final class TrajectoryAnalyzer: ObservableObject {
     @Published var isAnalyzing = false
     @Published var observations: [VNTrajectoryObservation] = []
     @Published var stillFrame: UIImage?
+    @Published var sourceOrientation: CGImagePropertyOrientation = .up
     @Published var errorMessage: String?
 
     var trajectoryCount: Int { observations.count }
@@ -20,10 +21,11 @@ final class TrajectoryAnalyzer: ObservableObject {
         errorMessage = nil
 
         do {
-            let detected = try await Self.detectTrajectories(in: videoURL)
-            observations = detected
+            let result = try await Self.detectTrajectories(in: videoURL)
+            observations = result.observations
+            sourceOrientation = result.orientation
 
-            if let lastTime = detected.last?.timeRange.end {
+            if let lastTime = result.observations.last?.timeRange.end {
                 stillFrame = try? await Self.extractFrame(from: videoURL, at: lastTime)
             }
         } catch {
@@ -32,11 +34,16 @@ final class TrajectoryAnalyzer: ObservableObject {
         isAnalyzing = false
     }
 
-    private static func detectTrajectories(in url: URL) async throws -> [VNTrajectoryObservation] {
+    private struct DetectionResult {
+        let observations: [VNTrajectoryObservation]
+        let orientation: CGImagePropertyOrientation
+    }
+
+    private static func detectTrajectories(in url: URL) async throws -> DetectionResult {
         try await Task.detached(priority: .userInitiated) {
             let asset = AVURLAsset(url: url)
             guard let track = try await asset.loadTracks(withMediaType: .video).first else {
-                return []
+                return DetectionResult(observations: [], orientation: .up)
             }
             let transform = try await track.load(.preferredTransform)
             let orientation = cgOrientation(from: transform)
@@ -71,7 +78,7 @@ final class TrajectoryAnalyzer: ObservableObject {
                 try? handler.perform([request])
             }
 
-            return latestResults
+            return DetectionResult(observations: latestResults, orientation: orientation)
         }.value
     }
 
@@ -87,14 +94,12 @@ final class TrajectoryAnalyzer: ObservableObject {
 }
 
 private func cgOrientation(from transform: CGAffineTransform) -> CGImagePropertyOrientation {
-    // AVAssetTrack.preferredTransform encodes the rotation needed to display the video upright.
-    // Vision wants a CGImagePropertyOrientation hint so it can return upright-space coordinates.
     if transform.a == 0 && transform.b == 1 && transform.c == -1 && transform.d == 0 {
-        return .right   // 90° CW — typical portrait phone video
+        return .right
     } else if transform.a == 0 && transform.b == -1 && transform.c == 1 && transform.d == 0 {
-        return .left    // 90° CCW
+        return .left
     } else if transform.a == -1 && transform.b == 0 && transform.c == 0 && transform.d == -1 {
-        return .down    // 180°
+        return .down
     }
     return .up
 }

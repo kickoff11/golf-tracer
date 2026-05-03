@@ -52,7 +52,8 @@ struct ContentView: View {
                     .font(.headline)
                 TrajectoryOverlayView(
                     stillFrame: still,
-                    trajectories: analyzer.observations
+                    trajectories: analyzer.observations,
+                    orientation: analyzer.sourceOrientation
                 )
             }
         } else if let videoURL {

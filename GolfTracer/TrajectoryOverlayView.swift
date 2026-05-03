@@ -1,3 +1,4 @@
+import ImageIO
 import SwiftUI
 import UIKit
 import Vision
@@ -5,6 +6,7 @@ import Vision
 struct TrajectoryOverlayView: View {
     let stillFrame: UIImage
     let trajectories: [VNTrajectoryObservation]
+    let orientation: CGImagePropertyOrientation
 
     var body: some View {
         Image(uiImage: stillFrame)
@@ -29,10 +31,8 @@ struct TrajectoryOverlayView: View {
         size: CGSize,
         color: Color
     ) {
-        let points = trajectory.projectedPoints.map { point in
-            // Vision uses normalized coords with origin bottom-left;
-            // SwiftUI Canvas uses origin top-left, so flip Y.
-            CGPoint(x: point.x * size.width, y: (1 - point.y) * size.height)
+        let points = trajectory.projectedPoints.map { rawPoint in
+            uprightPoint(rawX: rawPoint.x, rawY: rawPoint.y, size: size)
         }
         guard let first = points.first else { return }
 
@@ -41,16 +41,34 @@ struct TrajectoryOverlayView: View {
         for point in points.dropFirst() {
             path.addLine(to: point)
         }
-
-        // Glow underneath
         context.stroke(path, with: .color(color.opacity(0.4)), lineWidth: 10)
-        // Main line
         context.stroke(path, with: .color(color), lineWidth: 3)
 
-        // Endpoint dots
         for point in points {
             let dot = Path(ellipseIn: CGRect(x: point.x - 3, y: point.y - 3, width: 6, height: 6))
             context.fill(dot, with: .color(color))
         }
+    }
+
+    // Vision returns coordinates in the raw pixel-buffer space (bottom-left origin).
+    // The still frame is upright (preferred-transform applied), so raw coords need
+    // a rotation to match. Then flip Y for SwiftUI's top-left origin.
+    private func uprightPoint(rawX: CGFloat, rawY: CGFloat, size: CGSize) -> CGPoint {
+        let (uX, uY): (CGFloat, CGFloat)
+        switch orientation {
+        case .right:
+            uX = rawY
+            uY = 1 - rawX
+        case .left:
+            uX = 1 - rawY
+            uY = rawX
+        case .down:
+            uX = 1 - rawX
+            uY = 1 - rawY
+        default:
+            uX = rawX
+            uY = rawY
+        }
+        return CGPoint(x: uX * size.width, y: (1 - uY) * size.height)
     }
 }
