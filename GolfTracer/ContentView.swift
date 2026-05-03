@@ -8,18 +8,35 @@ struct ContentView: View {
     @State private var isLoading = false
     @StateObject private var analyzer = TrajectoryAnalyzer()
 
+    private var hasResult: Bool {
+        analyzer.stillFrame != nil && !analyzer.observations.isEmpty
+    }
+
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(spacing: 20) {
-                    videoArea
-                    pickButton
-                    analyzeButton
-                    resultArea
+            VStack(spacing: 16) {
+                mainArea
+                    .frame(maxHeight: .infinity)
+
+                if let error = analyzer.errorMessage {
+                    Text("Error: \(error)")
+                        .font(.callout)
+                        .foregroundStyle(.red)
+                        .multilineTextAlignment(.center)
                 }
-                .padding()
+
+                pickButton
+                analyzeButton
             }
+            .padding()
             .navigationTitle("Golf Tracer")
+            .toolbar {
+                if hasResult {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("Show Video") { analyzer.observations = [] }
+                    }
+                }
+            }
             .onChange(of: selectedItem) { _, newItem in
                 Task { await loadVideo(from: newItem) }
             }
@@ -27,10 +44,19 @@ struct ContentView: View {
     }
 
     @ViewBuilder
-    private var videoArea: some View {
-        if let videoURL {
+    private var mainArea: some View {
+        if let still = analyzer.stillFrame, !analyzer.observations.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                let plural = analyzer.trajectoryCount == 1 ? "y" : "ies"
+                Text("Detected \(analyzer.trajectoryCount) trajector\(plural)")
+                    .font(.headline)
+                TrajectoryOverlayView(
+                    stillFrame: still,
+                    trajectories: analyzer.observations
+                )
+            }
+        } else if let videoURL {
             VideoPlayer(player: AVPlayer(url: videoURL))
-                .frame(height: 300)
                 .clipShape(RoundedRectangle(cornerRadius: 12))
         } else if isLoading {
             placeholder { ProgressView("Loading video…") }
@@ -85,33 +111,12 @@ struct ContentView: View {
         .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
-    @ViewBuilder
-    private var resultArea: some View {
-        if let error = analyzer.errorMessage {
-            Text("Error: \(error)")
-                .font(.callout)
-                .foregroundStyle(.red)
-                .multilineTextAlignment(.center)
-        } else if let still = analyzer.stillFrame, !analyzer.observations.isEmpty {
-            VStack(alignment: .leading, spacing: 8) {
-                let plural = analyzer.trajectoryCount == 1 ? "y" : "ies"
-                Text("Detected \(analyzer.trajectoryCount) trajector\(plural)")
-                    .font(.headline)
-                TrajectoryOverlayView(
-                    stillFrame: still,
-                    trajectories: analyzer.observations
-                )
-            }
-        }
-    }
-
     private func placeholder<Content: View>(@ViewBuilder content: () -> Content) -> some View {
         ZStack {
             RoundedRectangle(cornerRadius: 12)
                 .fill(Color.gray.opacity(0.15))
             content()
         }
-        .frame(height: 300)
     }
 
     private func runAnalysis() {
