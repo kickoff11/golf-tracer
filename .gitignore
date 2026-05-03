@@ -1,0 +1,24 @@
+## User settings
+xcuserdata/
+*.xcuserstate
+*.xcuserdatad/
+
+## Build artifacts
+build/
+DerivedData/
+*.xcworkspace/xcuserdata/
+
+## Swift Package Manager
+.swiftpm/
+Package.resolved
+.build/
+
+## CocoaPods (not used, but standard to ignore)
+Pods/
+
+## macOS
+.DS_Store
+
+## Secrets
+*.env
+*.env.local
