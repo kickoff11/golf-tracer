@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import ImageIO
 import UIKit
 import Vision
 
@@ -34,7 +35,11 @@ final class TrajectoryAnalyzer: ObservableObject {
     private static func detectTrajectories(in url: URL) async throws -> [VNTrajectoryObservation] {
         try await Task.detached(priority: .userInitiated) {
             let asset = AVURLAsset(url: url)
-            let duration = try await asset.load(.duration)
+            guard let track = try await asset.loadTracks(withMediaType: .video).first else {
+                return []
+            }
+            let transform = try await track.load(.preferredTransform)
+            let orientation = cgOrientation(from: transform)
 
             var latestResults: [VNTrajectoryObservation] = []
             let lock = NSLock()
@@ -49,9 +54,26 @@ final class TrajectoryAnalyzer: ObservableObject {
                 lock.unlock()
             }
 
-            let processor = VNVideoProcessor(url: url)
-            try processor.addRequest(request, processingOptions: VNVideoProcessor.RequestProcessingOptions())
-            try processor.analyze(CMTimeRange(start: .zero, duration: duration))
+            let reader = try AVAssetReader(asset: asset)
+            let output = AVAssetReaderTrackOutput(
+                track: track,
+                outputSettings: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
+            )
+            reader.add(output)
+            reader.startReading()
+
+            while let sampleBuffer = output.copyNextSampleBuffer() {
+                guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { continue }
+                let timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+                request.timeRange = CMTimeRange(start: timestamp, duration: .zero)
+
+                let handler = VNImageRequestHandler(
+                    cvPixelBuffer: pixelBuffer,
+                    orientation: orientation,
+                    options: [:]
+                )
+                try? handler.perform([request])
+            }
 
             return latestResults
         }.value
@@ -66,4 +88,17 @@ final class TrajectoryAnalyzer: ObservableObject {
         let result = try await generator.image(at: time)
         return UIImage(cgImage: result.image)
     }
+}
+
+private func cgOrientation(from transform: CGAffineTransform) -> CGImagePropertyOrientation {
+    // AVAssetTrack.preferredTransform encodes the rotation needed to display the video upright.
+    // Vision wants a CGImagePropertyOrientation hint so it can return upright-space coordinates.
+    if transform.a == 0 && transform.b == 1 && transform.c == -1 && transform.d == 0 {
+        return .right   // 90° CW — typical portrait phone video
+    } else if transform.a == 0 && transform.b == -1 && transform.c == 1 && transform.d == 0 {
+        return .left    // 90° CCW
+    } else if transform.a == -1 && transform.b == 0 && transform.c == 0 && transform.d == -1 {
+        return .down    // 180°
+    }
+    return .up
 }
