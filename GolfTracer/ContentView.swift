@@ -10,14 +10,15 @@ struct ContentView: View {
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 20) {
-                videoArea
-                pickButton
-                analyzeButton
-                resultArea
-                Spacer()
+            ScrollView {
+                VStack(spacing: 20) {
+                    videoArea
+                    pickButton
+                    analyzeButton
+                    resultArea
+                }
+                .padding()
             }
-            .padding()
             .navigationTitle("Golf Tracer")
             .onChange(of: selectedItem) { _, newItem in
                 Task { await loadVideo(from: newItem) }
@@ -29,7 +30,7 @@ struct ContentView: View {
     private var videoArea: some View {
         if let videoURL {
             VideoPlayer(player: AVPlayer(url: videoURL))
-                .frame(height: 360)
+                .frame(height: 300)
                 .clipShape(RoundedRectangle(cornerRadius: 12))
         } else if isLoading {
             placeholder { ProgressView("Loading video…") }
@@ -91,11 +92,16 @@ struct ContentView: View {
                 .font(.callout)
                 .foregroundStyle(.red)
                 .multilineTextAlignment(.center)
-        } else if !analyzer.isAnalyzing && analyzer.trajectoryCount > 0 {
-            let plural = analyzer.trajectoryCount == 1 ? "y" : "ies"
-            Text("Detected \(analyzer.trajectoryCount) trajector\(plural)")
-                .font(.callout)
-                .foregroundStyle(.secondary)
+        } else if let still = analyzer.stillFrame, !analyzer.observations.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                let plural = analyzer.trajectoryCount == 1 ? "y" : "ies"
+                Text("Detected \(analyzer.trajectoryCount) trajector\(plural)")
+                    .font(.headline)
+                TrajectoryOverlayView(
+                    stillFrame: still,
+                    trajectories: analyzer.observations
+                )
+            }
         }
     }
 
@@ -105,7 +111,7 @@ struct ContentView: View {
                 .fill(Color.gray.opacity(0.15))
             content()
         }
-        .frame(height: 360)
+        .frame(height: 300)
     }
 
     private func runAnalysis() {
