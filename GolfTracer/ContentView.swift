@@ -6,6 +6,7 @@ struct ContentView: View {
     @State private var selectedItem: PhotosPickerItem?
     @State private var videoURL: URL?
     @State private var isLoading = false
+    @StateObject private var analyzer = TrajectoryAnalyzer()
 
     var body: some View {
         NavigationStack {
@@ -27,16 +28,25 @@ struct ContentView: View {
                 }
 
                 Button {
-                    // trajectory analysis goes here next
+                    guard let url = videoURL else { return }
+                    Task { await analyzer.analyze(videoURL: url) }
                 } label: {
-                    Text("Analyze Trajectory")
-                        .font(.headline)
-                        .padding()
-                        .frame(maxWidth: .infinity)
-                        .background(Color.gray.opacity(0.2))
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                    HStack {
+                        if analyzer.isAnalyzing {
+                            ProgressView().tint(.white)
+                        }
+                        Text(analyzer.isAnalyzing ? "Analyzing…" : "Analyze Trajectory")
+                            .font(.headline)
+                    }
+                    .padding()
+                    .frame(maxWidth: .infinity)
+                    .background(videoURL == nil ? Color.gray.opacity(0.2) : Color.green)
+                    .foregroundStyle(videoURL == nil ? .secondary : .white)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
                 }
-                .disabled(videoURL == nil)
+                .disabled(videoURL == nil || analyzer.isAnalyzing)
+
+                resultArea
 
                 Spacer()
             }
@@ -65,6 +75,22 @@ struct ContentView: View {
                 }
                 .foregroundStyle(.secondary)
             }
+        }
+    }
+
+    @ViewBuilder
+    private var resultArea: some View {
+        if let error = analyzer.errorMessage {
+            Text("Error: \(error)")
+                .font(.callout)
+                .foregroundStyle(.red)
+                .multilineTextAlignment(.center)
+        } else if !analyzer.isAnalyzing && analyzer.trajectoryCount > 0 {
+            Text("Detected \(analyzer.trajectoryCount) trajector\(analyzer.trajectoryCount == 1 ? "y" : "ies")")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        } else if !analyzer.isAnalyzing && videoURL != nil && analyzer.trajectoryCount == 0 && analyzer.errorMessage == nil {
+            EmptyView()
         }
     }
 
