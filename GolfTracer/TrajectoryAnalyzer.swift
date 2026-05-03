@@ -63,12 +63,8 @@ final class TrajectoryAnalyzer: ObservableObject {
             reader.startReading()
 
             while let sampleBuffer = output.copyNextSampleBuffer() {
-                guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { continue }
-                let timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-                request.timeRange = CMTimeRange(start: timestamp, duration: .zero)
-
                 let handler = VNImageRequestHandler(
-                    cvPixelBuffer: pixelBuffer,
+                    cmSampleBuffer: sampleBuffer,
                     orientation: orientation,
                     options: [:]
                 )
