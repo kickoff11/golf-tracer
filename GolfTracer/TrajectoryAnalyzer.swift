@@ -70,12 +70,18 @@ final class TrajectoryAnalyzer: ObservableObject {
             reader.startReading()
 
             while let sampleBuffer = output.copyNextSampleBuffer() {
+                // Diagnostic: don't pass orientation hint either — process raw buffer.
                 let handler = VNImageRequestHandler(
                     cmSampleBuffer: sampleBuffer,
-                    orientation: orientation,
                     options: [:]
                 )
                 try? handler.perform([request])
+            }
+
+            print("[Diagnostic] preferredTransform: a=\(transform.a) b=\(transform.b) c=\(transform.c) d=\(transform.d) tx=\(transform.tx) ty=\(transform.ty)")
+            print("[Diagnostic] detected orientation: \(orientation.rawValue)")
+            if let firstPoint = latestResults.first?.projectedPoints.first {
+                print("[Diagnostic] first trajectory first point: x=\(firstPoint.x) y=\(firstPoint.y)")
             }
 
             return DetectionResult(observations: latestResults, orientation: orientation)
@@ -85,7 +91,8 @@ final class TrajectoryAnalyzer: ObservableObject {
     private static func extractFrame(from url: URL, at time: CMTime) async throws -> UIImage {
         let asset = AVURLAsset(url: url)
         let generator = AVAssetImageGenerator(asset: asset)
-        generator.appliesPreferredTrackTransform = true
+        // Diagnostic: keep still frame in raw (untransformed) space to match Vision's coords.
+        generator.appliesPreferredTrackTransform = false
         generator.requestedTimeToleranceBefore = .zero
         generator.requestedTimeToleranceAfter = .zero
         let result = try await generator.image(at: time)
