@@ -50,9 +50,25 @@ struct TrajectoryOverlayView: View {
         }
     }
 
-    // Diagnostic mode: still frame and trajectories are both in raw pixel-buffer space.
-    // Just flip Y for SwiftUI's top-left origin.
+    // Vision returns coordinates in the raw pixel-buffer space (bottom-left origin).
+    // The still frame is upright (preferred-transform applied), so rotate raw coords
+    // to match, then flip Y for SwiftUI's top-left origin.
     private func uprightPoint(rawX: CGFloat, rawY: CGFloat, size: CGSize) -> CGPoint {
-        return CGPoint(x: rawX * size.width, y: (1 - rawY) * size.height)
+        let (uX, uY): (CGFloat, CGFloat)
+        switch orientation {
+        case .right:
+            uX = rawY
+            uY = 1 - rawX
+        case .left:
+            uX = 1 - rawY
+            uY = rawX
+        case .down:
+            uX = 1 - rawX
+            uY = 1 - rawY
+        default:
+            uX = rawX
+            uY = rawY
+        }
+        return CGPoint(x: uX * size.width, y: (1 - uY) * size.height)
     }
 }
