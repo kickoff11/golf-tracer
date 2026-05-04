@@ -1,15 +1,24 @@
 import AVKit
 import PhotosUI
 import SwiftUI
+import Vision
 
 struct ContentView: View {
     @State private var selectedItem: PhotosPickerItem?
     @State private var videoURL: URL?
     @State private var isLoading = false
+    @State private var showAllTrajectories = false
     @StateObject private var analyzer = TrajectoryAnalyzer()
 
     private var hasResult: Bool {
         analyzer.stillFrame != nil && !analyzer.observations.isEmpty
+    }
+
+    private var displayedTrajectories: [VNTrajectoryObservation] {
+        if showAllTrajectories {
+            return analyzer.observations
+        }
+        return analyzer.bestTrajectory.map { [$0] } ?? []
     }
 
     var body: some View {
@@ -33,7 +42,12 @@ struct ContentView: View {
             .toolbar {
                 if hasResult {
                     ToolbarItem(placement: .topBarTrailing) {
-                        Button("Show Video") { analyzer.observations = [] }
+                        Button(showAllTrajectories ? "Show Best" : "Show All") {
+                            showAllTrajectories.toggle()
+                        }
+                    }
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button("Reset") { analyzer.observations = [] }
                     }
                 }
             }
@@ -47,12 +61,14 @@ struct ContentView: View {
     private var mainArea: some View {
         if let still = analyzer.stillFrame, !analyzer.observations.isEmpty, let url = videoURL {
             VStack(alignment: .leading, spacing: 8) {
-                let plural = analyzer.trajectoryCount == 1 ? "y" : "ies"
-                Text("Detected \(analyzer.trajectoryCount) trajector\(plural)")
+                let label = showAllTrajectories
+                    ? "Showing all \(analyzer.trajectoryCount) trajectories"
+                    : "Showing best trajectory (of \(analyzer.trajectoryCount))"
+                Text(label)
                     .font(.headline)
                 AnimatedTrajectoryView(
                     videoURL: url,
-                    trajectories: analyzer.observations,
+                    trajectories: displayedTrajectories,
                     orientation: analyzer.sourceOrientation,
                     aspectRatio: still.size.width / still.size.height
                 )

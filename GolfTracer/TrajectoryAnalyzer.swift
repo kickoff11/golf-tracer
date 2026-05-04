@@ -14,6 +14,19 @@ final class TrajectoryAnalyzer: ObservableObject {
 
     var trajectoryCount: Int { observations.count }
 
+    var bestTrajectory: VNTrajectoryObservation? {
+        observations.max { Self.score($0) < Self.score($1) }
+    }
+
+    private static func score(_ obs: VNTrajectoryObservation) -> Float {
+        let points = obs.projectedPoints
+        guard let first = points.first, let last = points.last else { return 0 }
+        let dx = last.x - first.x
+        let dy = last.y - first.y
+        let displacement = sqrt(dx * dx + dy * dy)
+        return obs.confidence * obs.confidence * Float(displacement)
+    }
+
     func analyze(videoURL: URL) async {
         isAnalyzing = true
         observations = []
