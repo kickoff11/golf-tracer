@@ -8,6 +8,8 @@ struct ContentView: View {
     @State private var videoURL: URL?
     @State private var isLoading = false
     @State private var showAllTrajectories = false
+    @State private var manualTrajectory: ManualTrajectory?
+    @State private var showingManualTrace = false
     @StateObject private var analyzer = TrajectoryAnalyzer()
 
     private var hasResult: Bool {
@@ -36,6 +38,7 @@ struct ContentView: View {
 
                 pickButton
                 analyzeButton
+                manualTraceButton
             }
             .padding()
             .navigationTitle("Golf Tracer")
@@ -54,7 +57,29 @@ struct ContentView: View {
             .onChange(of: selectedItem) { _, newItem in
                 Task { await loadVideo(from: newItem) }
             }
+            .sheet(isPresented: $showingManualTrace) {
+                if let url = videoURL {
+                    ManualTraceView(
+                        videoURL: url,
+                        aspectRatio: manualTraceAspectRatio(),
+                        onDone: { trajectory in
+                            manualTrajectory = trajectory
+                            showingManualTrace = false
+                        },
+                        onCancel: {
+                            showingManualTrace = false
+                        }
+                    )
+                }
+            }
         }
+    }
+
+    private func manualTraceAspectRatio() -> CGFloat {
+        if let still = analyzer.stillFrame {
+            return still.size.width / still.size.height
+        }
+        return 9.0 / 16.0  // sensible default for portrait phone video
     }
 
     @ViewBuilder
@@ -112,6 +137,21 @@ struct ContentView: View {
             analyzeButtonLabel
         }
         .disabled(videoURL == nil || analyzer.isAnalyzing)
+    }
+
+    private var manualTraceButton: some View {
+        Button {
+            showingManualTrace = true
+        } label: {
+            Text("Manual Trace")
+                .font(.headline)
+                .padding()
+                .frame(maxWidth: .infinity)
+                .background(videoURL == nil ? Color.gray.opacity(0.2) : Color.orange)
+                .foregroundStyle(videoURL == nil ? Color.secondary : Color.white)
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+        }
+        .disabled(videoURL == nil)
     }
 
     private var analyzeButtonLabel: some View {

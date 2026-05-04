@@ -73,10 +73,9 @@ final class TrajectoryAnalyzer: ObservableObject {
                 latestResults = trajectories
                 lock.unlock()
             }
-            // Tune for a small fast-moving golf ball:
-            // ~3-25 pixels radius in a 1920-wide frame → normalized 0.0015..0.013.
-            request.objectMinimumNormalizedRadius = 0.0015
-            request.objectMaximumNormalizedRadius = 0.02
+            // Loose bounds — Vision's defaults work fine; we'll filter post-hoc.
+            request.objectMinimumNormalizedRadius = 0.001
+            request.objectMaximumNormalizedRadius = 0.1
 
             let reader = try AVAssetReader(asset: asset)
             let output = AVAssetReaderTrackOutput(
