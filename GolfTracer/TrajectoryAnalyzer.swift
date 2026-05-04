@@ -66,13 +66,17 @@ final class TrajectoryAnalyzer: ObservableObject {
 
             let request = VNDetectTrajectoriesRequest(
                 frameAnalysisSpacing: .zero,
-                trajectoryLength: 5
+                trajectoryLength: 3
             ) { request, _ in
                 guard let trajectories = request.results as? [VNTrajectoryObservation] else { return }
                 lock.lock()
                 latestResults = trajectories
                 lock.unlock()
             }
+            // Tune for a small fast-moving golf ball:
+            // ~3-25 pixels radius in a 1920-wide frame → normalized 0.0015..0.013.
+            request.objectMinimumNormalizedRadius = 0.0015
+            request.objectMaximumNormalizedRadius = 0.02
 
             let reader = try AVAssetReader(asset: asset)
             let output = AVAssetReaderTrackOutput(
