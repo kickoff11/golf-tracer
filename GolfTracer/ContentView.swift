@@ -45,16 +45,18 @@ struct ContentView: View {
 
     @ViewBuilder
     private var mainArea: some View {
-        if let still = analyzer.stillFrame, !analyzer.observations.isEmpty {
+        if let still = analyzer.stillFrame, !analyzer.observations.isEmpty, let url = videoURL {
             VStack(alignment: .leading, spacing: 8) {
                 let plural = analyzer.trajectoryCount == 1 ? "y" : "ies"
                 Text("Detected \(analyzer.trajectoryCount) trajector\(plural)")
                     .font(.headline)
-                TrajectoryOverlayView(
-                    stillFrame: still,
+                AnimatedTrajectoryView(
+                    videoURL: url,
                     trajectories: analyzer.observations,
-                    orientation: analyzer.sourceOrientation
+                    orientation: analyzer.sourceOrientation,
+                    aspectRatio: still.size.width / still.size.height
                 )
+                .id(url)
             }
         } else if let videoURL {
             VideoPlayer(player: AVPlayer(url: videoURL))
