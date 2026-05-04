@@ -13,7 +13,12 @@ struct ContentView: View {
     @StateObject private var analyzer = TrajectoryAnalyzer()
 
     private var hasResult: Bool {
-        analyzer.stillFrame != nil && !analyzer.observations.isEmpty
+        (analyzer.stillFrame != nil && !analyzer.observations.isEmpty) ||
+            (manualTrajectory?.taps.count ?? 0) >= 3
+    }
+
+    private var hasManualResult: Bool {
+        (manualTrajectory?.taps.count ?? 0) >= 3
     }
 
     private var displayedTrajectories: [VNTrajectoryObservation] {
@@ -44,13 +49,18 @@ struct ContentView: View {
             .navigationTitle("Golf Tracer")
             .toolbar {
                 if hasResult {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Button(showAllTrajectories ? "Show Best" : "Show All") {
-                            showAllTrajectories.toggle()
+                    if !hasManualResult {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button(showAllTrajectories ? "Show Best" : "Show All") {
+                                showAllTrajectories.toggle()
+                            }
                         }
                     }
                     ToolbarItem(placement: .topBarLeading) {
-                        Button("Reset") { analyzer.observations = [] }
+                        Button("Reset") {
+                            analyzer.observations = []
+                            manualTrajectory = nil
+                        }
                     }
                 }
             }
@@ -84,7 +94,18 @@ struct ContentView: View {
 
     @ViewBuilder
     private var mainArea: some View {
-        if let still = analyzer.stillFrame, !analyzer.observations.isEmpty, let url = videoURL {
+        if let manual = manualTrajectory, manual.taps.count >= 3, let url = videoURL {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Manual trajectory (\(manual.taps.count) taps)")
+                    .font(.headline)
+                ManualAnimatedTrajectoryView(
+                    videoURL: url,
+                    trajectory: manual,
+                    aspectRatio: manualTraceAspectRatio()
+                )
+                .id(url)
+            }
+        } else if let still = analyzer.stillFrame, !analyzer.observations.isEmpty, let url = videoURL {
             VStack(alignment: .leading, spacing: 8) {
                 let label = showAllTrajectories
                     ? "Showing all \(analyzer.trajectoryCount) trajectories"
