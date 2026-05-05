@@ -147,24 +147,39 @@ final class TrajectoryVideoExporter: ObservableObject {
         ciContext: CIContext
     ) -> CVPixelBuffer? {
         let sourceImage = CIImage(cvPixelBuffer: pixelBuffer)
-        // Apply preferredTransform to bring the frame upright.
-        let displayTransform = uprightTransform(natural: natural, transform: transform)
-        let upright = sourceImage.transformed(by: displayTransform)
 
-        // Build the trace overlay UIImage at upright render size.
+        // Rotate source to upright, then translate so the upright frame sits at (0,0).
+        var t = transform
+        let postRotateBounds = CGRect(origin: .zero, size: natural).applying(transform)
+        t.tx -= postRotateBounds.origin.x
+        t.ty -= postRotateBounds.origin.y
+        let uprightImage = sourceImage.transformed(by: t)
+
+        // Force the upright image to start exactly at (0,0) with exactly `upright` size.
+        // (Defensive: small rounding errors can leave extent slightly off, which then
+        // expands the union extent and shrinks the video relative to the overlay.)
+        let cropRect = CGRect(origin: .zero, size: upright)
+        let cropped = uprightImage.cropped(to: cropRect)
+
         let overlay = renderTraceOverlay(
-            size: CGSize(width: Int(upright.extent.width), height: Int(upright.extent.height)),
+            size: upright,
             time: time,
             trailStart: trailStart,
             trailEnd: trailEnd,
             samples: samples
         )
+
         let composed: CIImage
         if let overlay, let cgOverlay = overlay.cgImage {
-            let overlayImage = CIImage(cgImage: cgOverlay)
-            composed = overlayImage.composited(over: upright)
+            let overlayCI = CIImage(cgImage: cgOverlay)
+            // CIImage origin is bottom-left; UIGraphics overlay was drawn top-left.
+            // Flip overlay vertically so its top-left maps to the upright top-left.
+            let flipped = overlayCI
+                .transformed(by: CGAffineTransform(scaleX: 1, y: -1))
+                .transformed(by: CGAffineTransform(translationX: 0, y: upright.height))
+            composed = flipped.composited(over: cropped)
         } else {
-            composed = upright
+            composed = cropped
         }
 
         var output: CVPixelBuffer?
@@ -174,14 +189,14 @@ final class TrajectoryVideoExporter: ObservableObject {
         ]
         CVPixelBufferCreate(
             kCFAllocatorDefault,
-            Int(composed.extent.width),
-            Int(composed.extent.height),
+            Int(upright.width),
+            Int(upright.height),
             kCVPixelFormatType_32BGRA,
             attrs as CFDictionary,
             &output
         )
         guard let out = output else { return nil }
-        ciContext.render(composed, to: out)
+        ciContext.render(composed, to: out, bounds: cropRect, colorSpace: CGColorSpaceCreateDeviceRGB())
         return out
     }
 
