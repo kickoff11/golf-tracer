@@ -11,6 +11,7 @@ struct ContentView: View {
     @State private var manualTrajectory: ManualTrajectory?
     @State private var showingManualTrace = false
     @StateObject private var analyzer = TrajectoryAnalyzer()
+    @StateObject private var exporter = TrajectoryVideoExporter()
 
     private var hasResult: Bool {
         (analyzer.stillFrame != nil && !analyzer.observations.isEmpty) ||
@@ -44,6 +45,10 @@ struct ContentView: View {
                 pickButton
                 analyzeButton
                 manualTraceButton
+                if hasManualResult {
+                    saveButton
+                    exportStatusView
+                }
             }
             .padding()
             .navigationTitle("Golf Tracer")
@@ -175,6 +180,49 @@ struct ContentView: View {
         .disabled(videoURL == nil)
     }
 
+    private var saveButton: some View {
+        Button(action: runExport) {
+            HStack {
+                if exporter.status == .exporting {
+                    ProgressView().tint(.white)
+                }
+                Text(saveButtonText)
+                    .font(.headline)
+            }
+            .padding()
+            .frame(maxWidth: .infinity)
+            .background(Color.purple)
+            .foregroundStyle(.white)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+        }
+        .disabled(exporter.status == .exporting)
+    }
+
+    private var saveButtonText: String {
+        switch exporter.status {
+        case .exporting: return "Exporting…"
+        case .savedToPhotos: return "Saved ✓ — Save Again"
+        default: return "Save to Photos"
+        }
+    }
+
+    @ViewBuilder
+    private var exportStatusView: some View {
+        switch exporter.status {
+        case .savedToPhotos:
+            Text("Saved to your photo library")
+                .font(.callout)
+                .foregroundStyle(.green)
+        case .failed(let message):
+            Text("Export failed: \(message)")
+                .font(.callout)
+                .foregroundStyle(.red)
+                .multilineTextAlignment(.center)
+        default:
+            EmptyView()
+        }
+    }
+
     private var analyzeButtonLabel: some View {
         let enabled = videoURL != nil && !analyzer.isAnalyzing
         return HStack {
@@ -202,6 +250,11 @@ struct ContentView: View {
     private func runAnalysis() {
         guard let url = videoURL else { return }
         Task { await analyzer.analyze(videoURL: url) }
+    }
+
+    private func runExport() {
+        guard let url = videoURL, let trajectory = manualTrajectory else { return }
+        Task { await exporter.export(videoURL: url, trajectory: trajectory) }
     }
 
     private func loadVideo(from item: PhotosPickerItem?) async {
