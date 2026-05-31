@@ -1,76 +1,80 @@
 import AVFoundation
 import CoreImage
+import CoreGraphics
 import Foundation
+import ImageIO
 import Photos
 import UIKit
 
 @MainActor
 final class TrajectoryVideoExporter: ObservableObject {
     enum Status: Equatable {
-        case idle
-        case exporting
-        case savedToPhotos
+        case idle, exporting, savedToPhotos
         case failed(String)
     }
-
     @Published var status: Status = .idle
 
-    func export(videoURL: URL, trajectory: ManualTrajectory) async {
+    func export(
+        videoURL: URL,
+        trajectories: [BallTrajectory],
+        orientation: CGImagePropertyOrientation
+    ) async {
         status = .exporting
         do {
-            print("[Exporter] starting render…")
-            let outputURL = try await renderAnnotated(videoURL: videoURL, trajectory: trajectory)
-            print("[Exporter] render done at \(outputURL.path), saving to Photos…")
-            try await saveToPhotos(url: outputURL)
-            print("[Exporter] saved.")
+            let out = try await Self.render(videoURL: videoURL,
+                                            trajectories: trajectories,
+                                            orientation: orientation)
+            try await Self.saveToPhotos(url: out)
             status = .savedToPhotos
         } catch {
-            print("[Exporter] failed:", error)
             status = .failed(error.localizedDescription)
         }
     }
 
-    // Render the trace by reading frames, drawing a CIImage overlay, writing a new file.
-    // This avoids AVVideoCompositionCoreAnimationTool, which is unreliable in Simulator.
-    private func renderAnnotated(videoURL: URL, trajectory: ManualTrajectory) async throws -> URL {
-        let asset = AVURLAsset(url: videoURL)
-        guard let track = try await asset.loadTracks(withMediaType: .video).first else {
-            throw ExportError.noVideoTrack
-        }
-        let naturalSize = try await track.load(.naturalSize)
-        let preferredTransform = try await track.load(.preferredTransform)
-        let nominalFrameRate = try await track.load(.nominalFrameRate)
-        let duration = try await asset.load(.duration)
+    // MARK: – Rendering
 
-        // The displayed (upright) size after applying preferredTransform.
-        let renderSize = uprightSize(natural: naturalSize, transform: preferredTransform)
+    private static func render(
+        videoURL: URL,
+        trajectories: [BallTrajectory],
+        orientation: CGImagePropertyOrientation
+    ) async throws -> URL {
+        let asset  = AVURLAsset(url: videoURL)
+        let tracks = try await asset.loadTracks(withMediaType: .video)
+        guard let track = tracks.first else { throw Err("No video track") }
+
+        let naturalSize = try await track.load(.naturalSize)
+        let transform   = try await track.load(.preferredTransform)
+
+        // Display size after applying the preferred transform
+        let displaySize: CGSize
+        switch cgOrientation(from: transform) {
+        case .right, .left: displaySize = CGSize(width: naturalSize.height, height: naturalSize.width)
+        default:            displaySize = naturalSize
+        }
 
         let outputURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString)
-            .appendingPathExtension("mov")
+            .appendingPathComponent("GolfTracer_\(Int(Date().timeIntervalSince1970)).mp4")
 
-        try? FileManager.default.removeItem(at: outputURL)
-
-        let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
-        let writerInput = AVAssetWriterInput(
-            mediaType: .video,
-            outputSettings: [
-                AVVideoCodecKey: AVVideoCodecType.h264,
-                AVVideoWidthKey: Int(renderSize.width),
-                AVVideoHeightKey: Int(renderSize.height)
-            ]
-        )
-        writerInput.expectsMediaDataInRealTime = false
-        let pixelAdaptor = AVAssetWriterInputPixelBufferAdaptor(
+        let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
+        let videoSettings: [String: Any] = [
+            AVVideoCodecKey:  AVVideoCodecType.h264,
+            AVVideoWidthKey:  Int(displaySize.width),
+            AVVideoHeightKey: Int(displaySize.height)
+        ]
+        let writerInput   = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
+        let adaptor       = AVAssetWriterInputPixelBufferAdaptor(
             assetWriterInput: writerInput,
             sourcePixelBufferAttributes: [
-                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
-                kCVPixelBufferWidthKey as String: Int(renderSize.width),
-                kCVPixelBufferHeightKey as String: Int(renderSize.height)
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32ARGB,
+                kCVPixelBufferWidthKey  as String: Int(displaySize.width),
+                kCVPixelBufferHeightKey as String: Int(displaySize.height)
             ]
         )
         writer.add(writerInput)
+        writer.startWriting()
+        writer.startSession(atSourceTime: .zero)
 
+        // Read source frames
         let reader = try AVAssetReader(asset: asset)
         let readerOutput = AVAssetReaderTrackOutput(
             track: track,
@@ -78,224 +82,144 @@ final class TrajectoryVideoExporter: ObservableObject {
         )
         readerOutput.alwaysCopiesSampleData = false
         reader.add(readerOutput)
+        reader.startReading()
 
-        guard reader.startReading() else { throw ExportError.readerFailed }
-        guard writer.startWriting() else { throw ExportError.writerFailed }
-        writer.startSession(atSourceTime: .zero)
+        let ciContext = CIContext()
 
-        let ciContext = CIContext(options: nil)
-        let fittedSamples = trajectory.fittedDensePoints()
-        let sortedTaps = trajectory.sortedTaps
-        let trailStart = sortedTaps.first.map { CMTimeGetSeconds($0.time) } ?? 0
-        let trailEnd = sortedTaps.last.map { CMTimeGetSeconds($0.time) } ?? CMTimeGetSeconds(duration)
+        while let sample = readerOutput.copyNextSampleBuffer() {
+            let pts = CMSampleBufferGetPresentationTimeStamp(sample)
+            guard let srcBuffer = CMSampleBufferGetImageBuffer(sample) else { continue }
 
-        let frameDuration = CMTime(value: 1, timescale: max(Int32(nominalFrameRate.rounded()), 30))
-        _ = frameDuration  // silence unused warning if frame-rate logic changes
+            // Apply preferred transform so the output is upright
+            var ciImage = CIImage(cvPixelBuffer: srcBuffer).transformed(by: transform)
+            // Re-centre after transform (transform may include translation)
+            ciImage = ciImage.transformed(by:
+                CGAffineTransform(translationX: -ciImage.extent.origin.x,
+                                  y: -ciImage.extent.origin.y))
 
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            let queue = DispatchQueue(label: "GolfTracer.Export")
-            writerInput.requestMediaDataWhenReady(on: queue) {
-                while writerInput.isReadyForMoreMediaData {
-                    guard let sampleBuffer = readerOutput.copyNextSampleBuffer() else {
-                        writerInput.markAsFinished()
-                        writer.finishWriting {
-                            if writer.status == .completed {
-                                continuation.resume()
-                            } else {
-                                continuation.resume(throwing: writer.error ?? ExportError.writerFailed)
-                            }
-                        }
-                        return
-                    }
-
-                    guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { continue }
-                    let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-                    let seconds = CMTimeGetSeconds(presentationTime)
-
-                    let composed = self.compose(
-                        pixelBuffer: pixelBuffer,
-                        time: seconds,
-                        trailStart: trailStart,
-                        trailEnd: trailEnd,
-                        samples: fittedSamples,
-                        upright: renderSize,
-                        transform: preferredTransform,
-                        natural: naturalSize,
-                        ciContext: ciContext
-                    )
-
-                    if let composed {
-                        if !pixelAdaptor.append(composed, withPresentationTime: presentationTime) {
-                            print("[Exporter] append failed at \(seconds)")
-                        }
-                    }
-                }
+            // Draw trajectory overlay
+            let overlay = Self.overlayImage(
+                at: CMTimeGetSeconds(pts),
+                trajectories: trajectories,
+                orientation: orientation,
+                size: displaySize
+            )
+            if let overlay {
+                ciImage = overlay.composited(over: ciImage)
             }
+
+            // Write to output buffer
+            guard let pool = adaptor.pixelBufferPool else { break }
+            var outBuffer: CVPixelBuffer?
+            CVPixelBufferPoolCreatePixelBuffer(nil, pool, &outBuffer)
+            guard let outBuffer else { break }
+            ciContext.render(ciImage, to: outBuffer)
+
+            while !writerInput.isReadyForMoreMediaData { await Task.yield() }
+            adaptor.append(outBuffer, withPresentationTime: pts)
         }
+
+        writerInput.markAsFinished()
+        await writer.finishWriting()
+        if let err = writer.error { throw err }
         return outputURL
     }
 
-    private func compose(
-        pixelBuffer: CVPixelBuffer,
-        time: Double,
-        trailStart: Double,
-        trailEnd: Double,
-        samples: [ManualTrajectory.FittedSample],
-        upright: CGSize,
-        transform: CGAffineTransform,
-        natural: CGSize,
-        ciContext: CIContext
-    ) -> CVPixelBuffer? {
-        let sourceImage = CIImage(cvPixelBuffer: pixelBuffer)
+    // Build a transparent CIImage with the yellow trajectory lines for one frame.
+    private static func overlayImage(
+        at seconds: Double,
+        trajectories: [BallTrajectory],
+        orientation: CGImagePropertyOrientation,
+        size: CGSize
+    ) -> CIImage? {
+        let scale = UIScreen.main.scale
+        let fmt = UIGraphicsImageRendererFormat()
+        fmt.scale = 1          // 1:1 pixel, not point
+        fmt.opaque = false
+        let renderer = UIGraphicsImageRenderer(size: size, format: fmt)
 
-        // Rotate source to upright, then translate so the upright frame sits at (0,0).
-        var t = transform
-        let postRotateBounds = CGRect(origin: .zero, size: natural).applying(transform)
-        t.tx -= postRotateBounds.origin.x
-        t.ty -= postRotateBounds.origin.y
-        let uprightImage = sourceImage.transformed(by: t)
+        let image = renderer.image { ctx in
+            let gc = ctx.cgContext
+            gc.setLineCap(.round)
+            gc.setLineJoin(.round)
 
-        // Force the upright image to start exactly at (0,0) with exactly `upright` size.
-        // (Defensive: small rounding errors can leave extent slightly off, which then
-        // expands the union extent and shrinks the video relative to the overlay.)
-        let cropRect = CGRect(origin: .zero, size: upright)
-        let cropped = uprightImage.cropped(to: cropRect)
+            for traj in trajectories {
+                let start = CMTimeGetSeconds(traj.timeRange.start)
+                let end   = CMTimeGetSeconds(traj.timeRange.end)
+                guard seconds >= start else { continue }
+                let progress = seconds >= end
+                    ? 1.0 : (seconds - start) / max(end - start, 0.0001)
+                let total   = traj.points.count
+                guard total > 0 else { continue }
+                let count   = max(1, min(total, Int(Double(total) * progress)))
+                let pts     = traj.points.prefix(count).map { p in
+                    uprightCGPoint(rawX: p.x, rawY: p.y, size: size, orientation: orientation)
+                }
+                guard pts.count > 1 else { continue }
 
-        let overlay = renderTraceOverlay(
-            size: upright,
-            time: time,
-            trailStart: trailStart,
-            trailEnd: trailEnd,
-            samples: samples
-        )
+                // Glow
+                gc.setStrokeColor(UIColor.yellow.withAlphaComponent(0.4).cgColor)
+                gc.setLineWidth(10)
+                gc.move(to: pts[0])
+                pts.dropFirst().forEach { gc.addLine(to: $0) }
+                gc.strokePath()
 
-        let composed: CIImage
-        if let overlay, let cgOverlay = overlay.cgImage {
-            let overlayCI = CIImage(cgImage: cgOverlay)
-            // CIImage origin is bottom-left; UIGraphics overlay was drawn top-left.
-            // Flip overlay vertically so its top-left maps to the upright top-left.
-            let flipped = overlayCI
-                .transformed(by: CGAffineTransform(scaleX: 1, y: -1))
-                .transformed(by: CGAffineTransform(translationX: 0, y: upright.height))
-            composed = flipped.composited(over: cropped)
-        } else {
-            composed = cropped
+                // Core line
+                gc.setStrokeColor(UIColor.yellow.cgColor)
+                gc.setLineWidth(3)
+                gc.move(to: pts[0])
+                pts.dropFirst().forEach { gc.addLine(to: $0) }
+                gc.strokePath()
+
+                // Leading dot
+                if let lead = pts.last {
+                    gc.setFillColor(UIColor.yellow.cgColor)
+                    gc.fillEllipse(in: CGRect(x: lead.x-5, y: lead.y-5, width: 10, height: 10))
+                }
+            }
         }
-
-        var output: CVPixelBuffer?
-        let attrs: [String: Any] = [
-            kCVPixelBufferCGImageCompatibilityKey as String: true,
-            kCVPixelBufferCGBitmapContextCompatibilityKey as String: true
-        ]
-        CVPixelBufferCreate(
-            kCFAllocatorDefault,
-            Int(upright.width),
-            Int(upright.height),
-            kCVPixelFormatType_32BGRA,
-            attrs as CFDictionary,
-            &output
-        )
-        guard let out = output else { return nil }
-        ciContext.render(composed, to: out, bounds: cropRect, colorSpace: CGColorSpaceCreateDeviceRGB())
-        return out
+        _ = scale  // suppress unused warning
+        return CIImage(image: image)
     }
 
-    private func renderTraceOverlay(
-        size: CGSize,
-        time: Double,
-        trailStart: Double,
-        trailEnd: Double,
-        samples: [ManualTrajectory.FittedSample]
-    ) -> UIImage? {
-        guard size.width > 0, size.height > 0, samples.count > 1 else { return nil }
-        guard time >= trailStart else { return nil }
+    // MARK: – Photos
 
-        let progress = time >= trailEnd ? 1.0 : (time - trailStart) / max(trailEnd - trailStart, 0.001)
-        let visibleCount = max(2, Int(Double(samples.count) * progress))
-        let visible = Array(samples.prefix(visibleCount))
-
-        let renderer = UIGraphicsImageRenderer(size: size)
-        return renderer.image { ctx in
-            ctx.cgContext.setLineCap(.round)
-            ctx.cgContext.setLineJoin(.round)
-
-            let lineWidth = max(4, size.width * 0.005)
-            let glowWidth = lineWidth * 3
-
-            let path = UIBezierPath()
-            let start = CGPoint(
-                x: visible[0].point.x * size.width,
-                y: visible[0].point.y * size.height
-            )
-            path.move(to: start)
-            for sample in visible.dropFirst() {
-                path.addLine(to: CGPoint(x: sample.point.x * size.width, y: sample.point.y * size.height))
-            }
-
-            UIColor.systemYellow.withAlphaComponent(0.45).setStroke()
-            path.lineWidth = glowWidth
-            path.stroke()
-
-            UIColor.systemYellow.setStroke()
-            path.lineWidth = lineWidth
-            path.stroke()
-
-            // Lead dot
-            if let last = visible.last {
-                let leadPoint = CGPoint(x: last.point.x * size.width, y: last.point.y * size.height)
-                let radius = lineWidth * 1.6
-                let dotRect = CGRect(
-                    x: leadPoint.x - radius,
-                    y: leadPoint.y - radius,
-                    width: radius * 2,
-                    height: radius * 2
-                )
-                UIColor.systemYellow.setFill()
-                UIBezierPath(ovalIn: dotRect).fill()
+    private static func saveToPhotos(url: URL) async throws {
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            PHPhotoLibrary.shared().performChanges({
+                PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: url)
+            }) { ok, err in
+                if ok { cont.resume() } else { cont.resume(throwing: err ?? Err("Photos save failed")) }
             }
         }
     }
+}
 
-    private func uprightSize(natural: CGSize, transform: CGAffineTransform) -> CGSize {
-        let isRotated = abs(transform.b) > 0.5 && abs(transform.c) > 0.5
-        return isRotated
-            ? CGSize(width: natural.height, height: natural.width)
-            : natural
+// MARK: – Helpers
+
+private func uprightCGPoint(
+    rawX: CGFloat, rawY: CGFloat,
+    size: CGSize,
+    orientation: CGImagePropertyOrientation
+) -> CGPoint {
+    let (uX, uY): (CGFloat, CGFloat)
+    switch orientation {
+    case .right:  uX = rawY;       uY = 1 - rawX
+    case .left:   uX = 1 - rawY;   uY = rawX
+    case .down:   uX = 1 - rawX;   uY = 1 - rawY
+    default:      uX = rawX;       uY = rawY
     }
+    return CGPoint(x: uX * size.width, y: (1 - uY) * size.height)
+}
 
-    // Compose: translate to positive coords after applying preferredTransform.
-    private func uprightTransform(natural: CGSize, transform: CGAffineTransform) -> CGAffineTransform {
-        var t = transform
-        let bounds = CGRect(origin: .zero, size: natural).applying(t)
-        t.tx -= bounds.origin.x
-        t.ty -= bounds.origin.y
-        return t
-    }
+private func cgOrientation(from t: CGAffineTransform) -> CGImagePropertyOrientation {
+    if t.a == 0 && t.b ==  1 && t.c == -1 && t.d == 0 { return .right }
+    if t.a == 0 && t.b == -1 && t.c ==  1 && t.d == 0 { return .left  }
+    if t.a == -1 && t.b == 0 && t.c ==  0 && t.d == -1 { return .down }
+    return .up
+}
 
-    private func saveToPhotos(url: URL) async throws {
-        let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
-        guard status == .authorized || status == .limited else {
-            throw ExportError.photosAccessDenied
-        }
-        try await PHPhotoLibrary.shared().performChanges {
-            let request = PHAssetCreationRequest.forAsset()
-            request.addResource(with: .video, fileURL: url, options: nil)
-        }
-    }
-
-    enum ExportError: LocalizedError {
-        case noVideoTrack
-        case readerFailed
-        case writerFailed
-        case photosAccessDenied
-
-        var errorDescription: String? {
-            switch self {
-            case .noVideoTrack: return "Video has no video track"
-            case .readerFailed: return "Could not read video"
-            case .writerFailed: return "Could not write output video"
-            case .photosAccessDenied: return "Photo library access was denied"
-            }
-        }
-    }
+private struct Err: LocalizedError {
+    let errorDescription: String?
+    init(_ msg: String) { errorDescription = msg }
 }

@@ -3,7 +3,6 @@ import AVKit
 import ImageIO
 import SwiftUI
 import UIKit
-import Vision
 
 @MainActor
 final class TrajectoryPlaybackController: ObservableObject {
@@ -66,7 +65,7 @@ struct PlayerLayerView: UIViewRepresentable {
 
 struct AnimatedTrajectoryView: View {
     let videoURL: URL
-    let trajectories: [VNTrajectoryObservation]
+    let trajectories: [BallTrajectory]
     let orientation: CGImagePropertyOrientation
     let aspectRatio: CGFloat
 
@@ -74,7 +73,7 @@ struct AnimatedTrajectoryView: View {
 
     init(
         videoURL: URL,
-        trajectories: [VNTrajectoryObservation],
+        trajectories: [BallTrajectory],
         orientation: CGImagePropertyOrientation,
         aspectRatio: CGFloat
     ) {
@@ -127,7 +126,7 @@ struct AnimatedTrajectoryView: View {
     private static let colors: [Color] = [.red, .yellow, .cyan, .green, .orange, .pink]
 
     private func drawProgressiveTrajectory(
-        _ trajectory: VNTrajectoryObservation,
+        _ trajectory: BallTrajectory,
         currentSeconds: Double,
         in context: GraphicsContext,
         size: CGSize,
@@ -141,10 +140,10 @@ struct AnimatedTrajectoryView: View {
             ? 1.0
             : (currentSeconds - start) / max(end - start, 0.0001)
 
-        let totalPoints = trajectory.projectedPoints.count
+        let totalPoints = trajectory.points.count
         guard totalPoints > 0 else { return }
         let visibleCount = max(1, min(totalPoints, Int(Double(totalPoints) * progress)))
-        let visiblePoints = trajectory.projectedPoints.prefix(visibleCount)
+        let visiblePoints = trajectory.points.prefix(visibleCount)
 
         let cgPoints = visiblePoints.map { rawPoint in
             uprightPoint(rawX: rawPoint.x, rawY: rawPoint.y, size: size)

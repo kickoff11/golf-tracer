@@ -1,11 +1,10 @@
 import ImageIO
 import SwiftUI
 import UIKit
-import Vision
 
 struct TrajectoryOverlayView: View {
     let stillFrame: UIImage
-    let trajectories: [VNTrajectoryObservation]
+    let trajectories: [BallTrajectory]
     let orientation: CGImagePropertyOrientation
 
     var body: some View {
@@ -26,12 +25,12 @@ struct TrajectoryOverlayView: View {
     private static let colors: [Color] = [.red, .yellow, .cyan, .green, .orange, .pink]
 
     private func drawTrajectory(
-        _ trajectory: VNTrajectoryObservation,
+        _ trajectory: BallTrajectory,
         in context: GraphicsContext,
         size: CGSize,
         color: Color
     ) {
-        let points = trajectory.projectedPoints.map { rawPoint in
+        let points = trajectory.points.map { rawPoint in
             uprightPoint(rawX: rawPoint.x, rawY: rawPoint.y, size: size)
         }
         guard let first = points.first else { return }
@@ -44,13 +43,15 @@ struct TrajectoryOverlayView: View {
         context.stroke(path, with: .color(color.opacity(0.4)), lineWidth: 10)
         context.stroke(path, with: .color(color), lineWidth: 3)
 
-        for point in points {
-            let dot = Path(ellipseIn: CGRect(x: point.x - 3, y: point.y - 3, width: 6, height: 6))
+        // The points are a dense smooth sampling, so a dot per point would smear into a
+        // blob — mark only the landing end.
+        if let lead = points.last {
+            let dot = Path(ellipseIn: CGRect(x: lead.x - 5, y: lead.y - 5, width: 10, height: 10))
             context.fill(dot, with: .color(color))
         }
     }
 
-    // Vision returns coordinates in the raw pixel-buffer space (bottom-left origin).
+    // Trajectory points are in raw pixel-buffer space (normalised, bottom-left origin).
     // The still frame is upright (preferred-transform applied), so rotate raw coords
     // to match, then flip Y for SwiftUI's top-left origin.
     private func uprightPoint(rawX: CGFloat, rawY: CGFloat, size: CGSize) -> CGPoint {

@@ -1,32 +1,23 @@
 import AVKit
 import PhotosUI
 import SwiftUI
-import Vision
 
 struct ContentView: View {
     @State private var selectedItem: PhotosPickerItem?
     @State private var videoURL: URL?
     @State private var isLoading = false
     @State private var showAllTrajectories = false
-    @State private var manualTrajectory: ManualTrajectory?
-    @State private var showingManualTrace = false
-    @StateObject private var analyzer = TrajectoryAnalyzer()
-    @StateObject private var exporter = TrajectoryVideoExporter()
+    @StateObject private var analyzer  = TrajectoryAnalyzer()
+    @StateObject private var exporter  = TrajectoryVideoExporter()
 
     private var hasResult: Bool {
-        (analyzer.stillFrame != nil && !analyzer.observations.isEmpty) ||
-            (manualTrajectory?.taps.count ?? 0) >= 3
+        analyzer.stillFrame != nil && !analyzer.trajectories.isEmpty
     }
 
-    private var hasManualResult: Bool {
-        (manualTrajectory?.taps.count ?? 0) >= 3
-    }
-
-    private var displayedTrajectories: [VNTrajectoryObservation] {
-        if showAllTrajectories {
-            return analyzer.observations
-        }
-        return analyzer.bestTrajectory.map { [$0] } ?? []
+    private var displayedTrajectories: [BallTrajectory] {
+        showAllTrajectories
+            ? analyzer.trajectories
+            : analyzer.bestTrajectory.map { [$0] } ?? []
     }
 
     var body: some View {
@@ -36,35 +27,33 @@ struct ContentView: View {
                     .frame(maxHeight: .infinity)
 
                 if let error = analyzer.errorMessage {
-                    Text("Error: \(error)")
+                    Text(error)
                         .font(.callout)
                         .foregroundStyle(.red)
                         .multilineTextAlignment(.center)
+                        .padding(.horizontal)
                 }
 
                 pickButton
                 analyzeButton
-                manualTraceButton
-                if hasManualResult {
-                    saveButton
-                    exportStatusView
-                }
+                if hasResult { saveButton }
+                exportStatus
             }
             .padding()
             .navigationTitle("Golf Tracer")
             .toolbar {
                 if hasResult {
-                    if !hasManualResult {
-                        ToolbarItem(placement: .topBarTrailing) {
-                            Button(showAllTrajectories ? "Show Best" : "Show All") {
-                                showAllTrajectories.toggle()
-                            }
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button(showAllTrajectories ? "Show Best" : "Show All") {
+                            showAllTrajectories.toggle()
                         }
                     }
                     ToolbarItem(placement: .topBarLeading) {
                         Button("Reset") {
-                            analyzer.observations = []
-                            manualTrajectory = nil
+                            analyzer.trajectories = []
+                            analyzer.stillFrame   = nil
+                            analyzer.errorMessage = nil
+                            showAllTrajectories   = false
                         }
                     }
                 }
@@ -72,51 +61,19 @@ struct ContentView: View {
             .onChange(of: selectedItem) { _, newItem in
                 Task { await loadVideo(from: newItem) }
             }
-            .sheet(isPresented: $showingManualTrace) {
-                if let url = videoURL {
-                    ManualTraceView(
-                        videoURL: url,
-                        aspectRatio: manualTraceAspectRatio(),
-                        onDone: { trajectory in
-                            manualTrajectory = trajectory
-                            showingManualTrace = false
-                        },
-                        onCancel: {
-                            showingManualTrace = false
-                        }
-                    )
-                }
-            }
         }
     }
 
-    private func manualTraceAspectRatio() -> CGFloat {
-        if let still = analyzer.stillFrame {
-            return still.size.width / still.size.height
-        }
-        return 9.0 / 16.0  // sensible default for portrait phone video
-    }
+    // MARK: – Main area
 
     @ViewBuilder
     private var mainArea: some View {
-        if let manual = manualTrajectory, manual.taps.count >= 3, let url = videoURL {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Manual trajectory (\(manual.taps.count) taps)")
-                    .font(.headline)
-                ManualAnimatedTrajectoryView(
-                    videoURL: url,
-                    trajectory: manual,
-                    aspectRatio: manualTraceAspectRatio()
-                )
-                .id(url)
-            }
-        } else if let still = analyzer.stillFrame, !analyzer.observations.isEmpty, let url = videoURL {
+        if let still = analyzer.stillFrame, !analyzer.trajectories.isEmpty, let url = videoURL {
             VStack(alignment: .leading, spacing: 8) {
                 let label = showAllTrajectories
                     ? "Showing all \(analyzer.trajectoryCount) trajectories"
-                    : "Showing best trajectory (of \(analyzer.trajectoryCount))"
-                Text(label)
-                    .font(.headline)
+                    : "Best trajectory (of \(analyzer.trajectoryCount))"
+                Text(label).font(.headline)
                 AnimatedTrajectoryView(
                     videoURL: url,
                     trajectories: displayedTrajectories,
@@ -125,8 +82,8 @@ struct ContentView: View {
                 )
                 .id(url)
             }
-        } else if let videoURL {
-            VideoPlayer(player: AVPlayer(url: videoURL))
+        } else if let url = videoURL {
+            VideoPlayer(player: AVPlayer(url: url))
                 .clipShape(RoundedRectangle(cornerRadius: 12))
         } else if isLoading {
             placeholder { ProgressView("Loading video…") }
@@ -135,12 +92,14 @@ struct ContentView: View {
                 VStack(spacing: 8) {
                     Image(systemName: "video")
                         .font(.system(size: 40))
-                    Text("No video selected")
+                    Text("Pick a video to get started")
                 }
                 .foregroundStyle(.secondary)
             }
         }
     }
+
+    // MARK: – Buttons
 
     private var pickButton: some View {
         PhotosPicker(
@@ -160,33 +119,29 @@ struct ContentView: View {
 
     private var analyzeButton: some View {
         Button(action: runAnalysis) {
-            analyzeButtonLabel
+            HStack {
+                if analyzer.isAnalyzing { ProgressView().tint(.white) }
+                Text(analyzer.isAnalyzing ? "Analyzing…" : "Analyze Trajectory")
+                    .font(.headline)
+            }
+            .padding()
+            .frame(maxWidth: .infinity)
+            .background(videoURL == nil || analyzer.isAnalyzing
+                        ? Color.gray.opacity(0.2) : Color.green)
+            .foregroundStyle(videoURL == nil || analyzer.isAnalyzing
+                             ? Color.secondary : Color.white)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
         }
         .disabled(videoURL == nil || analyzer.isAnalyzing)
-    }
-
-    private var manualTraceButton: some View {
-        Button {
-            showingManualTrace = true
-        } label: {
-            Text("Manual Trace")
-                .font(.headline)
-                .padding()
-                .frame(maxWidth: .infinity)
-                .background(videoURL == nil ? Color.gray.opacity(0.2) : Color.orange)
-                .foregroundStyle(videoURL == nil ? Color.secondary : Color.white)
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-        }
-        .disabled(videoURL == nil)
     }
 
     private var saveButton: some View {
         Button(action: runExport) {
             HStack {
-                if exporter.status == .exporting {
-                    ProgressView().tint(.white)
-                }
-                Text(saveButtonText)
+                if exporter.status == .exporting { ProgressView().tint(.white) }
+                Text(exporter.status == .exporting ? "Saving…"
+                     : exporter.status == .savedToPhotos ? "Saved ✓ — Save Again"
+                     : "Save to Photos")
                     .font(.headline)
             }
             .padding()
@@ -198,51 +153,26 @@ struct ContentView: View {
         .disabled(exporter.status == .exporting)
     }
 
-    private var saveButtonText: String {
-        switch exporter.status {
-        case .exporting: return "Exporting…"
-        case .savedToPhotos: return "Saved ✓ — Save Again"
-        default: return "Save to Photos"
-        }
-    }
-
     @ViewBuilder
-    private var exportStatusView: some View {
+    private var exportStatus: some View {
         switch exporter.status {
         case .savedToPhotos:
             Text("Saved to your photo library")
-                .font(.callout)
-                .foregroundStyle(.green)
-        case .failed(let message):
-            Text("Export failed: \(message)")
-                .font(.callout)
-                .foregroundStyle(.red)
-                .multilineTextAlignment(.center)
+                .font(.callout).foregroundStyle(.green)
+        case .failed(let msg):
+            Text("Export failed: \(msg)")
+                .font(.callout).foregroundStyle(.red)
+                .multilineTextAlignment(.center).padding(.horizontal)
         default:
             EmptyView()
         }
     }
 
-    private var analyzeButtonLabel: some View {
-        let enabled = videoURL != nil && !analyzer.isAnalyzing
-        return HStack {
-            if analyzer.isAnalyzing {
-                ProgressView().tint(.white)
-            }
-            Text(analyzer.isAnalyzing ? "Analyzing…" : "Analyze Trajectory")
-                .font(.headline)
-        }
-        .padding()
-        .frame(maxWidth: .infinity)
-        .background(enabled ? Color.green : Color.gray.opacity(0.2))
-        .foregroundStyle(enabled ? Color.white : Color.secondary)
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-    }
+    // MARK: – Helpers
 
-    private func placeholder<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+    private func placeholder<C: View>(@ViewBuilder content: () -> C) -> some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color.gray.opacity(0.15))
+            RoundedRectangle(cornerRadius: 12).fill(Color.gray.opacity(0.15))
             content()
         }
     }
@@ -253,24 +183,31 @@ struct ContentView: View {
     }
 
     private func runExport() {
-        guard let url = videoURL, let trajectory = manualTrajectory else { return }
-        Task { await exporter.export(videoURL: url, trajectory: trajectory) }
+        guard let url = videoURL, !analyzer.trajectories.isEmpty else { return }
+        Task {
+            await exporter.export(
+                videoURL: url,
+                trajectories: displayedTrajectories,
+                orientation: analyzer.sourceOrientation
+            )
+        }
     }
 
     private func loadVideo(from item: PhotosPickerItem?) async {
         guard let item else { return }
         isLoading = true
         defer { isLoading = false }
-
         do {
             let movie = try await item.loadTransferable(type: Movie.self)
-            videoURL = movie?.url
+            videoURL          = movie?.url
+            analyzer.trajectories = []
+            analyzer.stillFrame   = nil
+            analyzer.errorMessage = nil
+            showAllTrajectories   = false
         } catch {
             print("Failed to load video:", error)
         }
     }
 }
 
-#Preview {
-    ContentView()
-}
+#Preview { ContentView() }

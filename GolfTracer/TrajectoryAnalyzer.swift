@@ -2,44 +2,61 @@ import AVFoundation
 import Foundation
 import ImageIO
 import UIKit
-import Vision
 
 @MainActor
 final class TrajectoryAnalyzer: ObservableObject {
     @Published var isAnalyzing = false
-    @Published var observations: [VNTrajectoryObservation] = []
+    @Published var trajectories: [BallTrajectory] = []
     @Published var stillFrame: UIImage?
     @Published var sourceOrientation: CGImagePropertyOrientation = .up
     @Published var errorMessage: String?
 
-    var trajectoryCount: Int { observations.count }
+    /// Below this, the fitted arc is judged unreliable — likely scattered noise rather
+    /// than a real ball flight — and is discarded instead of drawn. A first estimate;
+    /// tune against real footage.
+    private static let minAcceptConfidence: Float = 0.30
 
-    var bestTrajectory: VNTrajectoryObservation? {
-        observations.max { Self.score($0) < Self.score($1) }
-    }
+    var trajectoryCount: Int { trajectories.count }
 
-    private static func score(_ obs: VNTrajectoryObservation) -> Float {
-        let points = obs.projectedPoints
-        guard let first = points.first, let last = points.last else { return 0 }
-        let dx = last.x - first.x
-        let dy = last.y - first.y
-        let displacement = sqrt(dx * dx + dy * dy)
-        return obs.confidence * obs.confidence * Float(displacement)
+    var bestTrajectory: BallTrajectory? {
+        trajectories.max { $0.confidence < $1.confidence }
     }
 
     func analyze(videoURL: URL) async {
-        isAnalyzing = true
-        observations = []
-        stillFrame = nil
+        isAnalyzing  = true
+        trajectories = []
+        stillFrame   = nil
         errorMessage = nil
 
         do {
-            let result = try await Self.detectTrajectories(in: videoURL)
-            observations = result.observations
-            sourceOrientation = result.orientation
+            // Locked-off-camera frame differencing finds white moving blobs; the fitter
+            // keeps only the ones that line up into a single gravity-shaped arc.
+            let detected = try await StaticCameraBallDetector.detect(in: videoURL)
+            sourceOrientation = detected.orientation
 
-            if let lastTime = result.observations.last?.timeRange.end {
-                stillFrame = try? await Self.extractFrame(from: videoURL, at: lastTime)
+            if let fit = TrajectoryFitter.fit(samples: detected.samples),
+               fit.confidence >= Self.minAcceptConfidence {
+                trajectories = [fit]
+            }
+
+            // Always extract a still frame so the aspect ratio is available even when no
+            // ball is detected.
+            let frameTime = trajectories.last?.timeRange.end
+                         ?? detected.videoDuration.map { CMTimeMultiplyByFloat64($0, multiplier: 0.5) }
+            if let t = frameTime {
+                stillFrame = try? await Self.extractFrame(from: videoURL, at: t)
+            }
+
+            if trajectories.isEmpty {
+                let fps = detected.nominalFPS.map { Int($0.rounded()) }
+                if let fps, fps < 50 {
+                    errorMessage = "No ball detected at \(fps) fps. Film at 60 fps or higher — " +
+                        "in Settings, choose Camera > Record Video and pick 4K 60fps or 1080p 60fps."
+                } else {
+                    errorMessage = "No ball detected. Put the phone on a fixed tripod placed behind " +
+                        "the golfer (down the line) and keep it perfectly still, so the moving ball " +
+                        "stands out against the steady background."
+                }
             }
         } catch {
             errorMessage = error.localizedDescription
@@ -47,71 +64,15 @@ final class TrajectoryAnalyzer: ObservableObject {
         isAnalyzing = false
     }
 
-    private struct DetectionResult {
-        let observations: [VNTrajectoryObservation]
-        let orientation: CGImagePropertyOrientation
-    }
-
-    private static func detectTrajectories(in url: URL) async throws -> DetectionResult {
-        try await Task.detached(priority: .userInitiated) {
-            let asset = AVURLAsset(url: url)
-            guard let track = try await asset.loadTracks(withMediaType: .video).first else {
-                return DetectionResult(observations: [], orientation: .up)
-            }
-            let transform = try await track.load(.preferredTransform)
-            let orientation = cgOrientation(from: transform)
-
-            var latestResults: [VNTrajectoryObservation] = []
-            let lock = NSLock()
-
-            let request = VNDetectTrajectoriesRequest(
-                frameAnalysisSpacing: .zero,
-                trajectoryLength: 3
-            ) { request, _ in
-                guard let trajectories = request.results as? [VNTrajectoryObservation] else { return }
-                lock.lock()
-                latestResults = trajectories
-                lock.unlock()
-            }
-            // Loose bounds — Vision's defaults work fine; we'll filter post-hoc.
-            request.objectMinimumNormalizedRadius = 0.001
-            request.objectMaximumNormalizedRadius = 0.1
-
-            let reader = try AVAssetReader(asset: asset)
-            let output = AVAssetReaderTrackOutput(
-                track: track,
-                outputSettings: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
-            )
-            reader.add(output)
-            reader.startReading()
-
-            while let sampleBuffer = output.copyNextSampleBuffer() {
-                let handler = VNImageRequestHandler(cmSampleBuffer: sampleBuffer, options: [:])
-                try? handler.perform([request])
-            }
-
-            return DetectionResult(observations: latestResults, orientation: orientation)
-        }.value
-    }
+    // MARK: – Frame extraction
 
     private static func extractFrame(from url: URL, at time: CMTime) async throws -> UIImage {
         let asset = AVURLAsset(url: url)
-        let generator = AVAssetImageGenerator(asset: asset)
-        generator.appliesPreferredTrackTransform = true
-        generator.requestedTimeToleranceBefore = .zero
-        generator.requestedTimeToleranceAfter = .zero
-        let result = try await generator.image(at: time)
+        let gen   = AVAssetImageGenerator(asset: asset)
+        gen.appliesPreferredTrackTransform    = true
+        gen.requestedTimeToleranceBefore      = CMTime(seconds: 0.5, preferredTimescale: 600)
+        gen.requestedTimeToleranceAfter       = CMTime(seconds: 0.5, preferredTimescale: 600)
+        let result = try await gen.image(at: time)
         return UIImage(cgImage: result.image)
     }
-}
-
-private func cgOrientation(from transform: CGAffineTransform) -> CGImagePropertyOrientation {
-    if transform.a == 0 && transform.b == 1 && transform.c == -1 && transform.d == 0 {
-        return .right
-    } else if transform.a == 0 && transform.b == -1 && transform.c == 1 && transform.d == 0 {
-        return .left
-    } else if transform.a == -1 && transform.b == 0 && transform.c == 0 && transform.d == -1 {
-        return .down
-    }
-    return .up
 }
