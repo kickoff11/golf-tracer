@@ -55,65 +55,89 @@ enum TrajectoryFitter {
         samples: [Sample],
         extrapolateFraction: Double = 0.25,
         sampleCount: Int = 140,
-        inlierTolerance: Double = 0.03
+        inlierTolerance: Double = 0.04
     ) -> BallTrajectory? {
-        // Need at least three measurements at three different moments to define a parabola.
+        return fitMultiple(
+            samples: samples,
+            maxTrajectories: 1,
+            extrapolateFraction: extrapolateFraction,
+            sampleCount: sampleCount,
+            inlierTolerance: inlierTolerance
+        ).first
+    }
+
+    static func fitMultiple(
+        samples: [Sample],
+        maxTrajectories: Int = 3,
+        extrapolateFraction: Double = 0.25,
+        sampleCount: Int = 140,
+        inlierTolerance: Double = 0.04
+    ) -> [BallTrajectory] {
         let distinctTimes = Set(samples.map { $0.time }).count
-        guard samples.count >= 3, distinctTimes >= 3 else { return nil }
+        guard samples.count >= 3, distinctTimes >= 3 else { return [] }
 
-        let best = ransac(samples: samples, inlierTolerance: inlierTolerance)
-        guard best.inliers.count >= 3 else { return nil }
+        var remainingSamples = samples
+        var results: [BallTrajectory] = []
 
-        // Refit each axis against every agreeing measurement for an accurate final curve.
-        let ts = best.inliers.map { $0.time }
-        let xs = best.inliers.map { Double($0.point.x) }
-        let ys = best.inliers.map { Double($0.point.y) }
-        guard let fx = fitQuadratic(ts: ts, vs: xs),
-              let fy = fitQuadratic(ts: ts, vs: ys) else { return nil }
+        for _ in 0..<maxTrajectories {
+            let activeDistinctTimes = Set(remainingSamples.map { $0.time }).count
+            guard remainingSamples.count >= 3, activeDistinctTimes >= 3 else { break }
 
-        let tStart = ts.min()!
-        let tEnd   = ts.max()!
-        let span   = max(tEnd - tStart, 0.0001)
-        let tExtrapolatedEnd = tEnd + span * extrapolateFraction
+            let best = ransac(samples: remainingSamples, inlierTolerance: inlierTolerance)
+            guard best.inliers.count >= 3 else { break }
 
-        // Lay points evenly along the curve. Keep every point inside the observed
-        // window; in the extrapolated tail, stop as soon as the arc would exit frame.
-        var pts: [CGPoint] = []
-        pts.reserveCapacity(sampleCount)
-        let denom = Double(max(sampleCount - 1, 1))
-        var lastKeptT = tStart
-        for i in 0..<sampleCount {
-            let t = tStart + (tExtrapolatedEnd - tStart) * (Double(i) / denom)
-            let xv = fx.a * t * t + fx.b * t + fx.c
-            let yv = fy.a * t * t + fy.b * t + fy.c
-            let inFrame = xv >= -0.02 && xv <= 1.02 && yv >= -0.02 && yv <= 1.02
-            if t > tEnd && !inFrame { break }      // don't draw a wild off-screen guess
-            pts.append(CGPoint(x: clamp01(xv), y: clamp01(yv)))
-            lastKeptT = t
+            // Refit each axis against every agreeing measurement for an accurate final curve.
+            let ts = best.inliers.map { $0.time }
+            let xs = best.inliers.map { Double($0.point.x) }
+            let ys = best.inliers.map { Double($0.point.y) }
+            guard let fx = fitQuadratic(ts: ts, vs: xs),
+                  let fy = fitQuadratic(ts: ts, vs: ys) else { break }
+
+            let tStart = ts.min()!
+            let tEnd   = ts.max()!
+            let span   = max(tEnd - tStart, 0.0001)
+            let tExtrapolatedEnd = tEnd + span * extrapolateFraction
+
+            // Lay points evenly along the curve.
+            var pts: [CGPoint] = []
+            pts.reserveCapacity(sampleCount)
+            let denom = Double(max(sampleCount - 1, 1))
+            var lastKeptT = tStart
+            for i in 0..<sampleCount {
+                let t = tStart + (tExtrapolatedEnd - tStart) * (Double(i) / denom)
+                let xv = fx.a * t * t + fx.b * t + fx.c
+                let yv = fy.a * t * t + fy.b * t + fy.c
+                let inFrame = xv >= -0.02 && xv <= 1.02 && yv >= -0.02 && yv <= 1.02
+                if t > tEnd && !inFrame { break }
+                pts.append(CGPoint(x: clamp01(xv), y: clamp01(yv)))
+                lastKeptT = t
+            }
+            guard pts.count >= 2 else { continue }
+
+            let timeRange = CMTimeRange(
+                start: CMTime(seconds: tStart, preferredTimescale: 600),
+                duration: CMTime(seconds: max(lastKeptT - tStart, 0.0001), preferredTimescale: 600)
+            )
+
+            // Calculate confidence relative to active flight window.
+            let flightSamples = remainingSamples.filter { $0.time >= tStart && $0.time <= tEnd }
+            let flightDistinctTimes = Set(flightSamples.map { $0.time }).count
+            let ratio = Double(best.inliers.count) / Double(max(flightDistinctTimes, 1))
+            let countFactor = min(1.0, Double(best.inliers.count) / 8.0)
+            let tightness = max(0.4, 1 - (best.rms / inlierTolerance) * 0.6)
+            let confidence = Float(max(0, min(1, ratio * countFactor * tightness)))
+
+            results.append(BallTrajectory(points: pts, timeRange: timeRange, confidence: confidence))
+
+            // Remove the inliers of this fit from the sample pool for the next iteration.
+            let inlierKeys = Set(best.inliers.map { String(format: "%.4f_%.4f_%.4f", $0.time, $0.point.x, $0.point.y) })
+            remainingSamples = remainingSamples.filter {
+                let key = String(format: "%.4f_%.4f_%.4f", $0.time, $0.point.x, $0.point.y)
+                return !inlierKeys.contains(key)
+            }
         }
-        guard pts.count >= 2 else { return nil }
 
-        // End the time window at the last point actually drawn (the tail may have been
-        // cut short above) so the arc reveals in lock-step with the points.
-        let timeRange = CMTimeRange(
-            start: CMTime(seconds: tStart, preferredTimescale: 600),
-            duration: CMTime(seconds: max(lastKeptT - tStart, 0.0001), preferredTimescale: 600)
-        )
-
-        // Confidence multiplies three independent signs of a real trajectory, so a high
-        // score requires ALL of them — this is what stops random scattered noise from
-        // being mistaken for an arc. (Any three points define a parabola perfectly, so a
-        // "tight" fit alone proves nothing; a genuine ball flight is also seen in many
-        // frames and agrees across a large share of the measurements.)
-        //   ratio       — how big a share of all measurements landed on the curve
-        //   countFactor — were there enough agreeing points to be believable at all
-        //   tightness   — how closely those points hugged the curve
-        let ratio = Double(best.inliers.count) / Double(max(distinctTimes, 1))
-        let countFactor = min(1.0, Double(best.inliers.count) / 8.0)
-        let tightness = max(0, 1 - best.rms / inlierTolerance)
-        let confidence = Float(max(0, min(1, ratio * countFactor * tightness)))
-
-        return BallTrajectory(points: pts, timeRange: timeRange, confidence: confidence)
+        return results
     }
 
     // MARK: – RANSAC
