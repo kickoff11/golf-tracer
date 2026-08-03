@@ -274,15 +274,6 @@ class GolfTracerViewModel: ObservableObject {
                 analyzer.setupInfo = setup
                 analyzer.trajectories = []
                 
-                if let setupInfo = setup, let ballPos = setupInfo.estimatedBallPosition {
-                    // ballPos is in Upright Vision coordinates.
-                    // Convert it to normalized screen tap space: x = ballPos.x, y = 1 - ballPos.y
-                    let screenTap = CGPoint(x: ballPos.x, y: 1.0 - ballPos.y)
-                    // denormalize to Native Landscape coordinate
-                    startPoint = denormalizeTapPoint(screenTap, orientation: orientation)
-                    startTime = CMTimeGetSeconds(setupTime)
-                }
-                
                 videoDuration = CMTimeGetSeconds(duration)
                 
                 let newPlayer = AVPlayer(url: url)

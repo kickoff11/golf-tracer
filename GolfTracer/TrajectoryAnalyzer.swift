@@ -131,11 +131,8 @@ final class TrajectoryAnalyzer: ObservableObject {
         let coeffP2 = tPeak * tPeak
         let coeffP1 = 2.0 * (1.0 - tPeak) * tPeak
         
-        let w_shape = max(alpha, 0.1)
-        let denomC = coeffP0 + coeffP1 * w_shape + coeffP2
-        
-        let Cy = (Ya * denomC - coeffP0 * Y0 - coeffP2 * Y2) / (coeffP1 * w_shape)
-        let Cx = (Xa * denomC - coeffP0 * X0 - coeffP2 * X2) / (coeffP1 * w_shape)
+        let Cy = (Ya - coeffP0 * Y0 - coeffP2 * Y2) / coeffP1
+        let Cx = (Xa - coeffP0 * X0 - coeffP2 * X2) / coeffP1
         
         // Unified Time Warping (Piecewise Quadratic) - Guarantees slowest speed at apex, fast launch, and fast landing
         let safe_ua = u_a
@@ -189,8 +186,14 @@ final class TrajectoryAnalyzer: ObservableObject {
                 horizontalOffset = bulge * (curveFactor - 1.0) * 0.15
             }
             
-            currentX += horizontalOffset
-
+            switch orientation {
+            case .right:
+                currentY += horizontalOffset
+            case .left:
+                currentY -= horizontalOffset
+            default:
+                currentX += horizontalOffset
+            }
             let nativePt = nativePoint(from: CGPoint(x: currentX, y: currentY), orientation: orientation)
             pts.append(CGPoint(x: max(0, min(1, nativePt.x)), y: max(0, min(1, nativePt.y))))
         }
