@@ -151,9 +151,6 @@ final class TrajectoryAnalyzer: ObservableObject {
         let kL = vApex / speedL
         let kR = vApex / speedR
         
-        // Apply the slice/hook offset to the true horizontal axis of the video
-        let isPortrait = (orientation == .right || orientation == .left)
-        
         for i in 0..<sampleCount {
             let u = Double(i) / Double(sampleCount - 1)
             
@@ -192,11 +189,7 @@ final class TrajectoryAnalyzer: ObservableObject {
                 horizontalOffset = bulge * (curveFactor - 1.0) * 0.15
             }
             
-            if isPortrait {
-                currentY += horizontalOffset
-            } else {
-                currentX += horizontalOffset
-            }
+            currentX += horizontalOffset
 
             let nativePt = nativePoint(from: CGPoint(x: currentX, y: currentY), orientation: orientation)
             pts.append(CGPoint(x: max(0, min(1, nativePt.x)), y: max(0, min(1, nativePt.y))))
