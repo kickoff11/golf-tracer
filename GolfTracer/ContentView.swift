@@ -430,7 +430,7 @@ struct ContentView: View {
                     .frame(width: 70, alignment: .leading)
                 
                 Button {
-                    curveFactor = max(0.10, curveFactor - 0.01)
+                    curveFactor = max(0.70, curveFactor - 0.01)
                     generateTrajectory()
                 } label: { 
                     Image(systemName: "minus.square.fill")
@@ -441,13 +441,13 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain)
                 
-                Slider(value: $curveFactor, in: 0.10...2.00)
+                Slider(value: $curveFactor, in: 0.70...1.30)
                     .onChange(of: curveFactor) { _, _ in
                         generateTrajectory()
                     }
                 
                 Button {
-                    curveFactor = min(2.00, curveFactor + 0.01)
+                    curveFactor = min(1.30, curveFactor + 0.01)
                     generateTrajectory()
                 } label: { 
                     Image(systemName: "plus.square.fill")

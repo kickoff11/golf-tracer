@@ -145,10 +145,8 @@ final class TrajectoryAnalyzer: ObservableObject {
         let coeffP1 = 2.0 * (1.0 - tPeak) * tPeak
         let Cy = (Ya - coeffP0 * Y0 - coeffP2 * Y2) / coeffP1
         
-        // Solve for Horizontal Rational Bezier Control Point (w = w_shape for adjustable draw/fade bulge)
-        let w_shape = max(alpha, 0.1)
-        let denomX = coeffP0 + coeffP1 * w_shape + coeffP2
-        let Cx = (Xa * denomX - coeffP0 * X0 - coeffP2 * X2) / (coeffP1 * w_shape)
+        // Solve for Horizontal Bezier Control Point (w = 1.0, standard parabola)
+        let Cx = (Xa - coeffP0 * X0 - coeffP2 * X2) / coeffP1
         
         // Unified Time Warping (Piecewise Quadratic) - Guarantees slowest speed at apex, fast launch, and fast landing
         let safe_ua = min(max(u_a, 0.05), 0.95)
@@ -185,11 +183,25 @@ final class TrajectoryAnalyzer: ObservableObject {
             // Vertical evaluation (Standard Quadratic Bezier)
             let currentY = invT * invT * Y0 + 2.0 * invT * t * Cy + t * t * Y2
             
-            // Horizontal evaluation (Rational Quadratic Bezier)
+            // Horizontal evaluation (Standard Quadratic Bezier)
             let term0 = invT * invT
-            let term1 = 2.0 * invT * t * w_shape
+            let term1 = 2.0 * invT * t
             let term2 = t * t
-            let currentX = (term0 * X0 + term1 * Cx + term2 * X2) / (term0 + term1 + term2)
+            var currentX = term0 * X0 + term1 * Cx + term2 * X2
+            
+            // Geometric Shape Tweak (Bends the curve horizontally to fit slices/hooks)
+            let horizontalOffset: Double
+            if t < tPeak {
+                let x = t / tPeak
+                let bulge = x * (1.0 - x) * (1.0 - x) * 6.75
+                horizontalOffset = bulge * (curveFactor - 1.0) * 0.15
+            } else {
+                let x = (t - tPeak) / (1.0 - tPeak)
+                let bulge = x * x * (1.0 - x) * 6.75
+                horizontalOffset = bulge * (curveFactor - 1.0) * 0.15
+            }
+            
+            currentX += horizontalOffset
             
             let nativePt = nativePoint(from: CGPoint(x: currentX, y: currentY), orientation: orientation)
             pts.append(CGPoint(x: max(0, min(1, nativePt.x)), y: max(0, min(1, nativePt.y))))
