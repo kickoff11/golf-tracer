@@ -142,9 +142,12 @@ struct AnimatedTrajectoryView: View {
         let end = CMTimeGetSeconds(trajectory.timeRange.end)
         guard currentSeconds >= start else { return }
 
-        let progress: Double = currentSeconds >= end
+        let linearProgress: Double = currentSeconds >= end
             ? 1.0
             : (currentSeconds - start) / max(end - start, 0.0001)
+            
+        let exponent = 1.5 + max(0.0, curveFactor)
+        let progress = 1.0 - pow(1.0 - linearProgress, exponent)
 
         let totalPoints = trajectory.points.count
         guard totalPoints > 0 else { return }
