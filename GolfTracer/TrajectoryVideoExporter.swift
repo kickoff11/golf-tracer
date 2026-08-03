@@ -1,58 +1,50 @@
 import AVFoundation
-import PhotosUI
-import SwiftUI
+import CoreImage
+import CoreGraphics
+import Foundation
+import ImageIO
+import Photos
+import UIKit
 
 @MainActor
-class TrajectoryVideoExporter: ObservableObject {
-    enum ExportStatus: Equatable {
-        case idle
-        case exporting
-        case completed(URL)
+final class TrajectoryVideoExporter: ObservableObject {
+    enum Status: Equatable {
+        case idle, exporting, savedToPhotos
         case failed(String)
     }
-
-    @Published var status: ExportStatus = .idle
+    @Published var status: Status = .idle
 
     func export(
         videoURL: URL,
         trajectories: [BallTrajectory],
         orientation: CGImagePropertyOrientation,
         deceleration: Double,
-        curveFactor: Double,
-        tracerTheme: TracerTheme,
-        tracerThickness: Double,
-        tracerTailLength: Double
+        curveFactor: Double
     ) async {
-        self.status = .exporting
+        status = .exporting
         do {
-            let outputURL = try await Self.render(
+            let out = try await Self.render(
                 videoURL: videoURL,
                 trajectories: trajectories,
                 orientation: orientation,
                 deceleration: deceleration,
-                curveFactor: curveFactor,
-                tracerTheme: tracerTheme,
-                tracerThickness: tracerThickness,
-                tracerTailLength: tracerTailLength
+                curveFactor: curveFactor
             )
-            try await Self.saveToPhotos(url: outputURL)
-            self.status = .completed(outputURL)
+            try await Self.saveToPhotos(url: out)
+            status = .savedToPhotos
         } catch {
-            self.status = .failed(error.localizedDescription)
+            status = .failed(error.localizedDescription)
         }
     }
 
-    // MARK: – Rendering via GPU (CoreAnimation)
+    // MARK: – Rendering
 
     private static func render(
         videoURL: URL,
         trajectories: [BallTrajectory],
         orientation: CGImagePropertyOrientation,
         deceleration: Double,
-        curveFactor: Double,
-        tracerTheme: TracerTheme,
-        tracerThickness: Double,
-        tracerTailLength: Double
+        curveFactor: Double
     ) async throws -> URL {
         let asset  = AVURLAsset(url: videoURL)
         let tracks = try await asset.loadTracks(withMediaType: .video)
@@ -64,90 +56,34 @@ class TrajectoryVideoExporter: ObservableObject {
             width: abs(size.width * t.a + size.height * t.c),
             height: abs(size.width * t.b + size.height * t.d)
         )
-        let durationCM = try await asset.load(.duration)
-        let duration = CMTimeGetSeconds(durationCM)
-
-        let videoComposition = AVMutableVideoComposition()
-        videoComposition.renderSize = displaySize
-        videoComposition.frameDuration = CMTime(value: 1, timescale: 30)
-
-        let instruction = AVMutableVideoCompositionInstruction()
-        instruction.timeRange = CMTimeRange(start: .zero, duration: durationCM)
-
-        let layerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: track)
-        layerInstruction.setTransform(t, at: .zero)
-        instruction.layerInstructions = [layerInstruction]
-        videoComposition.instructions = [instruction]
-
-        // --- CoreAnimation Setup ---
-        let parentLayer = CALayer()
-        parentLayer.frame = CGRect(origin: .zero, size: displaySize)
-        parentLayer.isGeometryFlipped = true // Match AVFoundation bottom-left video space
-
-        let videoLayer = CALayer()
-        videoLayer.frame = parentLayer.bounds
-        parentLayer.addSublayer(videoLayer)
-
-        let overlayLayer = CALayer()
-        overlayLayer.frame = parentLayer.bounds
-        parentLayer.addSublayer(overlayLayer)
         
-        for traj in trajectories {
-            let pts = traj.points
-            guard pts.count > 1 else { continue }
+        let videoComposition = AVVideoComposition(asset: asset) { request in
+            let seconds = CMTimeGetSeconds(request.compositionTime)
             
-            let startT = CMTimeGetSeconds(traj.timeRange.start)
-            let endT = CMTimeGetSeconds(traj.timeRange.end)
-            let flightDuration = max(endT - startT, 0.0001)
+            // Generate the overlay image
+            let overlay = Self.overlayImage(
+                at: seconds,
+                trajectories: trajectories,
+                orientation: orientation,
+                size: displaySize,
+                deceleration: deceleration,
+                curveFactor: curveFactor
+            )
             
-            let trajectoryLayer = CAShapeLayer()
-            trajectoryLayer.frame = parentLayer.bounds
-            trajectoryLayer.fillColor = UIColor.clear.cgColor
-            
-            // Use the most dominant color from the theme
-            let themeColor = tracerTheme.colors.last ?? .white
-            let uiColor = UIColor(themeColor)
-            
-            trajectoryLayer.strokeColor = uiColor.cgColor
-            trajectoryLayer.lineWidth = tracerThickness
-            trajectoryLayer.lineCap = .round
-            trajectoryLayer.lineJoin = .round
-            
-            // Add a neon glow
-            trajectoryLayer.shadowColor = uiColor.cgColor
-            trajectoryLayer.shadowRadius = tracerThickness * 1.5
-            trajectoryLayer.shadowOpacity = 0.8
-            trajectoryLayer.shadowOffset = .zero
-            
-            let path = CGMutablePath()
-            let firstPt = uprightCGPoint(rawX: pts[0].x, rawY: pts[0].y, size: displaySize, orientation: orientation)
-            path.move(to: firstPt)
-            
-            for i in 1..<pts.count {
-                let p = pts[i]
-                let visualPt = uprightCGPoint(rawX: p.x, rawY: p.y, size: displaySize, orientation: orientation)
-                path.addLine(to: visualPt)
+            // AVVideoComposition(asset:applyingCIFiltersWithHandler:) automatically applies the track's preferred transform
+            // so request.sourceImage is already properly rotated/oriented!
+            var finalImage = request.sourceImage
+            if let overlay {
+                // We composite the overlay over the source image
+                finalImage = overlay.composited(over: request.sourceImage)
             }
-            trajectoryLayer.path = path
-            
-            // Animate strokeEnd to trace the path
-            let anim = CABasicAnimation(keyPath: "strokeEnd")
-            anim.fromValue = 0.0
-            anim.toValue = 1.0
-            anim.duration = flightDuration
-            anim.beginTime = AVCoreAnimationBeginTimeAtZero + startT
-            anim.fillMode = .both
-            anim.isRemovedOnCompletion = false
-            
-            trajectoryLayer.add(anim, forKey: "strokeEnd")
-            overlayLayer.addSublayer(trajectoryLayer)
+            request.finish(with: finalImage, context: nil)
         }
-
-        videoComposition.animationTool = AVVideoCompositionCoreAnimationTool(postProcessingAsVideoLayer: videoLayer, in: parentLayer)
-
+        
         let outputURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("GolfTracer_\(UUID().uuidString).mov")
             
+        // Using HEVC 1080p for hardware-accelerated high-quality encoding
         guard let exportSession = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetHEVC1920x1080) else {
             throw Err("Cannot create export session")
         }
@@ -162,6 +98,92 @@ class TrajectoryVideoExporter: ObservableObject {
         }
         
         return outputURL
+    }
+
+    // Build a transparent CIImage with the yellow trajectory lines for one frame.
+    private static func overlayImage(
+        at seconds: Double,
+        trajectories: [BallTrajectory],
+        orientation: CGImagePropertyOrientation,
+        size: CGSize,
+        deceleration: Double,
+        curveFactor: Double
+    ) -> CIImage? {
+        let scale = UIScreen.main.scale
+        let fmt = UIGraphicsImageRendererFormat()
+        fmt.scale = 1          // 1:1 pixel, not point
+        fmt.opaque = false
+        let renderer = UIGraphicsImageRenderer(size: size, format: fmt)
+
+        let image = renderer.image { ctx in
+            let gc = ctx.cgContext
+            gc.setLineCap(.round)
+            gc.setLineJoin(.round)
+
+            for traj in trajectories {
+                let start = CMTimeGetSeconds(traj.timeRange.start)
+                let end   = CMTimeGetSeconds(traj.timeRange.end)
+                guard seconds >= start else { continue }
+                let linearProgress = seconds >= end
+                    ? 1.0 : (seconds - start) / max(end - start, 0.0001)
+                
+                let globalAlpha: Double = seconds > end
+                    ? max(0.0, 1.0 - (seconds - end) / 0.2)
+                    : 1.0
+                    
+                guard globalAlpha > 0 else { continue }
+                
+                // Realistic aerodynamic deceleration modulated by the user's slider
+                let exponent = 1.5 + max(0.0, curveFactor)
+                let progress = 1.0 - pow(1.0 - linearProgress, exponent)
+                
+                let total   = traj.points.count
+                guard total > 0 else { continue }
+                let count   = max(1, min(total, Int(Double(total) * progress)))
+                let pts     = traj.points.prefix(count).map { p in
+                    uprightCGPoint(rawX: p.x, rawY: p.y, size: size, orientation: orientation)
+                }
+                guard pts.count > 1 else { continue }
+
+                // Draw as a fading comet trail!
+                let pointCount = pts.count
+                for i in 1..<pointCount {
+                    let p1 = pts[i - 1]
+                    let p2 = pts[i]
+                    
+                    let segmentProgress = Double(i) / Double(pointCount)
+                    let alpha = segmentProgress * segmentProgress * globalAlpha
+                    
+                    if alpha < 0.02 { continue } // CULL invisible tail segments for massive speedup!
+                    
+                    let thickness = 2.0 + (5.0 * segmentProgress)
+                    let glowColor = UIColor.red.withAlphaComponent(CGFloat(alpha * 0.4)).cgColor
+                    let coreColor = UIColor.red.withAlphaComponent(CGFloat(alpha)).cgColor
+                    
+                    // Subtle glow
+                    gc.setStrokeColor(glowColor)
+                    gc.setLineWidth(thickness * 2.5)
+                    gc.move(to: p1)
+                    gc.addLine(to: p2)
+                    gc.strokePath()
+                    
+                    // Core line
+                    gc.setStrokeColor(coreColor)
+                    gc.setLineWidth(thickness)
+                    gc.move(to: p1)
+                    gc.addLine(to: p2)
+                    gc.strokePath()
+                }
+
+                // Tiny bright tip
+                if let lead = pts.last {
+                    gc.setFillColor(UIColor.red.withAlphaComponent(CGFloat(globalAlpha)).cgColor)
+                    gc.fillEllipse(in: CGRect(x: lead.x - 2.5, y: lead.y - 2.5, width: 5, height: 5))
+                }
+            }
+        }
+        _ = scale  // suppress unused warning
+        return CIImage(image: image)
     }
 
     // MARK: – Photos
@@ -199,6 +221,13 @@ private func uprightCGPoint(
     default:      uX = rawX;       uY = rawY
     }
     return CGPoint(x: uX * size.width, y: (1 - uY) * size.height)
+}
+
+private func cgOrientation(from t: CGAffineTransform) -> CGImagePropertyOrientation {
+    if t.a == 0 && t.b ==  1 && t.c == -1 && t.d == 0 { return .right }
+    if t.a == 0 && t.b == -1 && t.c ==  1 && t.d == 0 { return .left  }
+    if t.a == -1 && t.b == 0 && t.c ==  0 && t.d == -1 { return .down }
+    return .up
 }
 
 private struct Err: LocalizedError {

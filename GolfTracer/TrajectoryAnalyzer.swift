@@ -30,22 +30,35 @@ final class TrajectoryAnalyzer: ObservableObject {
         errorMessage = nil
 
         do {
+            // Locked-off-camera frame differencing finds white moving blobs; the fitter
+            // keeps only the ones that line up into a single gravity-shaped arc.
             let detected = try await StaticCameraBallDetector.detect(in: videoURL)
             sourceOrientation = detected.orientation
 
             let fits = detected.trajectories
-            let timeRange = detected.videoDuration.map { CMTimeRange(start: .zero, duration: $0) }
-                            ?? CMTimeRange(start: .zero, duration: CMTime(seconds: 4.0, preferredTimescale: 600))
-
-            trajectories = fits.compactMap { f -> BallTrajectory? in
-                guard f.confidence >= Self.minAcceptConfidence else { return nil }
-                return BallTrajectory(
-                    points: f.points,
-                    timeRange: timeRange,
-                    confidence: f.confidence
-                )
+            
+            // Filter out trajectories that move too slowly or cover too little distance (glove/club movement)
+            let ballFits = fits.filter { fit in
+                guard let first = fit.points.first, let last = fit.points.last else { return false }
+                let dx = last.x - first.x
+                let dy = last.y - first.y
+                let dist = (dx * dx + dy * dy).squareRoot()
+                let duration = CMTimeGetSeconds(fit.timeRange.duration)
+                let speed = dist / max(duration, 0.0001)
+                
+                // Ball launch is high speed (>= 0.4 screens per second) and covers significant distance (>= 0.20)
+                return dist >= 0.20 && speed >= 0.40 && fit.confidence >= Self.minAcceptConfidence
             }
 
+            if !ballFits.isEmpty {
+                trajectories = ballFits
+            } else if let bestFit = fits.max(by: { $0.confidence < $1.confidence }),
+                      bestFit.confidence >= Self.minAcceptConfidence {
+                trajectories = [bestFit]
+            }
+
+            // Always extract a still frame so the aspect ratio is available even when no
+            // ball is detected.
             let frameTime = trajectories.last?.timeRange.end
                          ?? detected.videoDuration.map { CMTimeMultiplyByFloat64($0, multiplier: 0.5) }
             if let t = frameTime {
@@ -72,7 +85,7 @@ final class TrajectoryAnalyzer: ObservableObject {
         isAnalyzing = false
     }
 
-    // MARK: - Manual Trajectory Generation
+    // MARK: – Manual Trajectory Generation
 
     func generateManualTrajectory(
         startPoint: CGPoint,
@@ -126,16 +139,19 @@ final class TrajectoryAnalyzer: ObservableObject {
         // Protect tPeak from edge cases
         tPeak = min(max(tPeak, 0.05), 0.95)
         
-        // Solve for True 3D Perspective Control Points (w = w_shape for adjustable depth distortion)
+        // Solve for Vertical Bezier Control Point (w = 1.0, standard parabola for gravity)
         let coeffP0 = (1.0 - tPeak) * (1.0 - tPeak)
         let coeffP2 = tPeak * tPeak
         let coeffP1 = 2.0 * (1.0 - tPeak) * tPeak
-        
         let Cy = (Ya - coeffP0 * Y0 - coeffP2 * Y2) / coeffP1
-        let Cx = (Xa - coeffP0 * X0 - coeffP2 * X2) / coeffP1
+        
+        // Solve for Horizontal Rational Bezier Control Point (w = w_shape for adjustable draw/fade bulge)
+        let w_shape = max(alpha, 0.1)
+        let denomX = coeffP0 + coeffP1 * w_shape + coeffP2
+        let Cx = (Xa * denomX - coeffP0 * X0 - coeffP2 * X2) / (coeffP1 * w_shape)
         
         // Unified Time Warping (Piecewise Quadratic) - Guarantees slowest speed at apex, fast launch, and fast landing
-        let safe_ua = u_a
+        let safe_ua = min(max(u_a, 0.05), 0.95)
         
         // Calculate base speeds required to hit the apex
         let speedL = tPeak / safe_ua
@@ -144,7 +160,7 @@ final class TrajectoryAnalyzer: ObservableObject {
         // Set the apex speed to be significantly slower than both (creates hang time)
         let vApex = 0.3 * min(speedL, speedR)
         
-        // Calculate smoothness weights for both sides to guarantee C1 continuity
+        // Calculate smoothness weights for both sides to guarantee C1 continuity (perfectly smooth transition)
         let kL = vApex / speedL
         let kR = vApex / speedR
         
@@ -166,34 +182,15 @@ final class TrajectoryAnalyzer: ObservableObject {
             
             let invT = 1.0 - t
             
-            // Standard Quadratic Bezier Evaluation
+            // Vertical evaluation (Standard Quadratic Bezier)
+            let currentY = invT * invT * Y0 + 2.0 * invT * t * Cy + t * t * Y2
+            
+            // Horizontal evaluation (Rational Quadratic Bezier)
             let term0 = invT * invT
-            let term1 = 2.0 * invT * t
+            let term1 = 2.0 * invT * t * w_shape
             let term2 = t * t
+            let currentX = (term0 * X0 + term1 * Cx + term2 * X2) / (term0 + term1 + term2)
             
-            var currentX = term0 * X0 + term1 * Cx + term2 * X2
-            var currentY = term0 * Y0 + term1 * Cy + term2 * Y2
-            
-            // Geometric Shape Tweak (Bends the curve horizontally to fit slices/hooks)
-            let horizontalOffset: Double
-            if t < tPeak {
-                let x = t / tPeak
-                let bulge = x * (1.0 - x) * (1.0 - x) * 6.75
-                horizontalOffset = bulge * (curveFactor - 1.0) * 0.15
-            } else {
-                let x = (t - tPeak) / (1.0 - tPeak)
-                let bulge = x * x * (1.0 - x) * 6.75
-                horizontalOffset = bulge * (curveFactor - 1.0) * 0.15
-            }
-            
-            switch orientation {
-            case .right:
-                currentY += horizontalOffset
-            case .left:
-                currentY -= horizontalOffset
-            default:
-                currentX += horizontalOffset
-            }
             let nativePt = nativePoint(from: CGPoint(x: currentX, y: currentY), orientation: orientation)
             pts.append(CGPoint(x: max(0, min(1, nativePt.x)), y: max(0, min(1, nativePt.y))))
         }
@@ -203,11 +200,7 @@ final class TrajectoryAnalyzer: ObservableObject {
             duration: CMTime(seconds: duration, preferredTimescale: 600)
         )
         
-        return BallTrajectory(
-            points: pts,
-            timeRange: timeRange,
-            confidence: 1.0
-        )
+        return BallTrajectory(points: pts, timeRange: timeRange, confidence: 1.0)
     }
 
     private func visualPoint(from nativePoint: CGPoint, orientation: CGImagePropertyOrientation) -> CGPoint {
@@ -235,14 +228,14 @@ final class TrajectoryAnalyzer: ObservableObject {
         let rawY: CGFloat
         switch orientation {
         case .right:
-            rawX = 1 - visualPoint.y
+            rawX = 1.0 - visualPoint.y
             rawY = visualPoint.x
         case .left:
             rawX = visualPoint.y
-            rawY = 1 - visualPoint.x
+            rawY = 1.0 - visualPoint.x
         case .down:
-            rawX = 1 - visualPoint.x
-            rawY = 1 - visualPoint.y
+            rawX = 1.0 - visualPoint.x
+            rawY = 1.0 - visualPoint.y
         default:
             rawX = visualPoint.x
             rawY = visualPoint.y
@@ -250,13 +243,15 @@ final class TrajectoryAnalyzer: ObservableObject {
         return CGPoint(x: rawX, y: rawY)
     }
 
+    // MARK: – Frame extraction
+
     static func extractFrame(from url: URL, at time: CMTime) async throws -> UIImage {
-        let asset = AVAsset(url: url)
-        let generator = AVAssetImageGenerator(asset: asset)
-        generator.appliesPreferredTrackTransform = true
-        generator.requestedTimeToleranceBefore = .zero
-        generator.requestedTimeToleranceAfter = .zero
-        let cgImage = try await generator.image(at: time).image
-        return UIImage(cgImage: cgImage)
+        let asset = AVURLAsset(url: url)
+        let gen   = AVAssetImageGenerator(asset: asset)
+        gen.appliesPreferredTrackTransform    = true
+        gen.requestedTimeToleranceBefore      = CMTime(seconds: 0.5, preferredTimescale: 600)
+        gen.requestedTimeToleranceAfter       = CMTime(seconds: 0.5, preferredTimescale: 600)
+        let result = try await gen.image(at: time)
+        return UIImage(cgImage: result.image)
     }
 }
