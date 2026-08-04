@@ -157,15 +157,27 @@ struct AnimatedTrajectoryView: View {
         let cgPoints = visiblePoints.map { rawPoint in
             uprightPoint(rawX: rawPoint.x, rawY: rawPoint.y, size: size)
         }
-        guard let first = cgPoints.first else { return }
-
-        var path = Path()
-        path.move(to: first)
-        for point in cgPoints.dropFirst() {
-            path.addLine(to: point)
+        let pointCount = cgPoints.count
+        guard pointCount > 1 else { return }
+        
+        for i in 1..<pointCount {
+            let p1 = cgPoints[i - 1]
+            let p2 = cgPoints[i]
+            
+            let segmentProgress = Double(i) / Double(pointCount)
+            let alpha = segmentProgress * segmentProgress
+            
+            if alpha < 0.02 { continue }
+            
+            var segmentPath = Path()
+            segmentPath.move(to: p1)
+            segmentPath.addLine(to: p2)
+            
+            let thickness = 2.0 + (5.0 * segmentProgress)
+            
+            context.stroke(segmentPath, with: .color(color.opacity(alpha * 0.4)), lineWidth: thickness * 3)
+            context.stroke(segmentPath, with: .color(color.opacity(alpha)), lineWidth: thickness)
         }
-        context.stroke(path, with: .color(color.opacity(0.4)), lineWidth: 10)
-        context.stroke(path, with: .color(color), lineWidth: 3)
 
         if let lead = cgPoints.last {
             let dot = Path(ellipseIn: CGRect(x: lead.x - 5, y: lead.y - 5, width: 10, height: 10))
