@@ -361,6 +361,10 @@ struct ContentView: View {
                 Button("Generate") {
                     isTrajectoryConfirmed = true
                     generateTrajectory()
+                    withAnimation {
+                        viewScale = 1.0; lastViewScale = 1.0
+                        viewOffset = .zero; lastViewOffset = .zero
+                    }
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
