@@ -19,7 +19,8 @@ final class TrajectoryVideoExporter: ObservableObject {
         trajectories: [BallTrajectory],
         orientation: CGImagePropertyOrientation,
         deceleration: Double,
-        curveFactor: Double
+        curveFactor: Double,
+        trailLength: Double
     ) async {
         status = .exporting
         do {
@@ -28,7 +29,8 @@ final class TrajectoryVideoExporter: ObservableObject {
                 trajectories: trajectories,
                 orientation: orientation,
                 deceleration: deceleration,
-                curveFactor: curveFactor
+                curveFactor: curveFactor,
+                trailLength: trailLength
             )
             try await Self.saveToPhotos(url: out)
             status = .savedToPhotos
@@ -44,7 +46,8 @@ final class TrajectoryVideoExporter: ObservableObject {
         trajectories: [BallTrajectory],
         orientation: CGImagePropertyOrientation,
         deceleration: Double,
-        curveFactor: Double
+        curveFactor: Double,
+        trailLength: Double
     ) async throws -> URL {
         let asset  = AVURLAsset(url: videoURL)
         let tracks = try await asset.loadTracks(withMediaType: .video)
@@ -67,7 +70,8 @@ final class TrajectoryVideoExporter: ObservableObject {
                 orientation: orientation,
                 size: displaySize,
                 deceleration: deceleration,
-                curveFactor: curveFactor
+                curveFactor: curveFactor,
+                trailLength: trailLength
             )
             
             // AVVideoComposition(asset:applyingCIFiltersWithHandler:) automatically applies the track's preferred transform
@@ -107,7 +111,8 @@ final class TrajectoryVideoExporter: ObservableObject {
         orientation: CGImagePropertyOrientation,
         size: CGSize,
         deceleration: Double,
-        curveFactor: Double
+        curveFactor: Double,
+        trailLength: Double
     ) -> CIImage? {
         let scale = UIScreen.main.scale
         let fmt = UIGraphicsImageRendererFormat()
@@ -121,27 +126,14 @@ final class TrajectoryVideoExporter: ObservableObject {
             gc.setLineJoin(.round)
 
             for traj in trajectories {
-                let start = CMTimeGetSeconds(traj.timeRange.start)
-                let end   = CMTimeGetSeconds(traj.timeRange.end)
-                guard seconds >= start else { continue }
-                let linearProgress = seconds >= end
-                    ? 1.0 : (seconds - start) / max(end - start, 0.0001)
-                
-                let globalAlpha: Double = seconds > end
-                    ? max(0.0, 1.0 - (seconds - end) / 0.2)
-                    : 1.0
-                    
-                guard globalAlpha > 0 else { continue }
-                
-                // Realistic aerodynamic deceleration modulated by the user's slider
-                let exponent = 1.5 + max(0.0, curveFactor)
-                let progress = 1.0 - pow(1.0 - linearProgress, exponent)
-                
-                let total   = traj.points.count
-                guard total > 0 else { continue }
-                let count   = max(1, min(total, Int(Double(total) * progress)))
-                let pts     = traj.points.prefix(count).map { p in
-                    uprightCGPoint(rawX: p.x, rawY: p.y, size: size, orientation: orientation)
+                guard let frame = TrajectoryRenderMath.frame(
+                    at: seconds,
+                    trajectory: traj,
+                    curve: curveFactor,
+                    trailLength: trailLength
+                ) else { continue }
+                let pts = traj.points[frame.pointRange].map {
+                    TrajectoryRenderMath.displayPoint(native: $0, orientation: orientation, size: size)
                 }
                 guard pts.count > 1 else { continue }
 
@@ -151,12 +143,11 @@ final class TrajectoryVideoExporter: ObservableObject {
                     let p1 = pts[i - 1]
                     let p2 = pts[i]
                     
-                    let segmentProgress = Double(i) / Double(pointCount)
-                    let alpha = segmentProgress * segmentProgress * globalAlpha
+                    let alpha = TrajectoryRenderMath.segmentAlpha(index: i, count: pointCount, globalAlpha: frame.globalAlpha)
                     
                     if alpha < 0.02 { continue } // CULL invisible tail segments for massive speedup!
                     
-                    let thickness = 2.0 + (5.0 * segmentProgress)
+                    let thickness = TrajectoryRenderMath.segmentWidth(index: i, count: pointCount)
                     let glowColor = UIColor.red.withAlphaComponent(CGFloat(alpha * 0.4)).cgColor
                     let coreColor = UIColor.red.withAlphaComponent(CGFloat(alpha)).cgColor
                     
@@ -177,7 +168,7 @@ final class TrajectoryVideoExporter: ObservableObject {
 
                 // Tiny bright tip
                 if let lead = pts.last {
-                    gc.setFillColor(UIColor.red.withAlphaComponent(CGFloat(globalAlpha)).cgColor)
+                    gc.setFillColor(UIColor.red.withAlphaComponent(CGFloat(frame.globalAlpha)).cgColor)
                     gc.fillEllipse(in: CGRect(x: lead.x - 2.5, y: lead.y - 2.5, width: 5, height: 5))
                 }
             }
@@ -207,21 +198,6 @@ final class TrajectoryVideoExporter: ObservableObject {
 }
 
 // MARK: – Helpers
-
-private func uprightCGPoint(
-    rawX: CGFloat, rawY: CGFloat,
-    size: CGSize,
-    orientation: CGImagePropertyOrientation
-) -> CGPoint {
-    let (uX, uY): (CGFloat, CGFloat)
-    switch orientation {
-    case .right:  uX = rawY;       uY = 1 - rawX
-    case .left:   uX = 1 - rawY;   uY = rawX
-    case .down:   uX = 1 - rawX;   uY = 1 - rawY
-    default:      uX = rawX;       uY = rawY
-    }
-    return CGPoint(x: uX * size.width, y: (1 - uY) * size.height)
-}
 
 private func cgOrientation(from t: CGAffineTransform) -> CGImagePropertyOrientation {
     if t.a == 0 && t.b ==  1 && t.c == -1 && t.d == 0 { return .right }

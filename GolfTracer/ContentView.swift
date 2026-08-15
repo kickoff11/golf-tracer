@@ -3,11 +3,10 @@ import PhotosUI
 import SwiftUI
 
 struct ContentView: View {
-    @State private var selectedItem: PhotosPickerItem?
     @State private var videoURL: URL?
+    @State private var preparedURL: URL?
     @State private var showPicker = false
     @State private var isLoading = false
-    @State private var showAllTrajectories = false
     
     // Custom Player and Scrubber states
     @State private var player: AVPlayer? = nil
@@ -15,6 +14,7 @@ struct ContentView: View {
     @State private var playerNotificationToken: NSObjectProtocol? = nil
     @State private var currentPlayerTime: Double = 0.0
     @State private var videoDuration: Double = 0.0
+    @State private var nominalFrameRate: Double = 30.0
     @State private var isPlayingVideo = false
     @State private var isScrubbing = false
     
@@ -27,6 +27,7 @@ struct ContentView: View {
     @State private var endTime: Double? = nil
     @State private var deceleration: Double = 0.55    // Apex Time (normalized)
     @State private var curveFactor: Double = 1.00     // S-Curve modifier
+    @State private var trailLength: Double = 0.70
     
     // Zoom & Pan states
     @State private var viewScale: CGFloat = 1.0
@@ -41,11 +42,7 @@ struct ContentView: View {
         analyzer.stillFrame != nil && !analyzer.trajectories.isEmpty
     }
 
-    private var displayedTrajectories: [BallTrajectory] {
-        showAllTrajectories
-            ? analyzer.trajectories
-            : analyzer.bestTrajectory.map { [$0] } ?? []
-    }
+    private var displayedTrajectories: [BallTrajectory] { analyzer.bestTrajectory.map { [$0] } ?? [] }
 
     var body: some View {
         NavigationStack {
@@ -102,12 +99,13 @@ struct ContentView: View {
                 }
             }
             .onChange(of: videoURL) { _, newURL in
-                if let url = newURL {
+                if let url = newURL, preparedURL != url {
                     Task {
                         await prepareVideo(url: url)
                     }
                 }
             }
+            .task { await restoreProjectIfAvailable() }
         }
     }
 
@@ -124,7 +122,8 @@ struct ContentView: View {
                     orientation: analyzer.sourceOrientation,
                     aspectRatio: aspect,
                     deceleration: deceleration,
-                    curveFactor: curveFactor
+                    curveFactor: curveFactor,
+                    trailLength: trailLength
                 )
                 .id(url.path + (analyzer.bestTrajectory?.id.uuidString ?? ""))
                 .scaleEffect(viewScale)
@@ -159,7 +158,7 @@ struct ContentView: View {
                 )
                 .clipped()
             }
-        } else if let url = videoURL {
+        } else if videoURL != nil {
             VStack(spacing: 8) {
                 ZStack {
                     if let player = player {
@@ -179,10 +178,13 @@ struct ContentView: View {
                                 let visualStart = uprightPoint(rawPoint: start, orientation: analyzer.sourceOrientation, in: geo.size)
                                 Circle()
                                     .fill(Color.green)
-                                    .frame(width: 6, height: 6)
+                                    .frame(width: 22, height: 22)
                                     .overlay(Circle().stroke(Color.white, lineWidth: 1))
                                     .position(visualStart)
                                     .shadow(radius: 2)
+                                    .gesture(DragGesture().onChanged { value in
+                                        startPoint = pointFromDisplay(value.location, in: geo.size)
+                                    })
                             }
                             
                             // Apex point marker
@@ -190,52 +192,27 @@ struct ContentView: View {
                                 let visualApex = uprightPoint(rawPoint: apex, orientation: analyzer.sourceOrientation, in: geo.size)
                                 Circle()
                                     .fill(Color.orange)
-                                    .frame(width: 6, height: 6)
+                                    .frame(width: 22, height: 22)
                                     .overlay(Circle().stroke(Color.white, lineWidth: 1))
                                     .position(visualApex)
                                     .shadow(radius: 2)
+                                    .gesture(DragGesture().onChanged { value in
+                                        apexPoint = pointFromDisplay(value.location, in: geo.size)
+                                    })
                             }
                             
-                            // Setup Debug Overlay
-                            if let setup = analyzer.setupInfo {
-                                if let personBox = setup.personBoundingBox {
-                                    Rectangle()
-                                        .stroke(Color.blue, lineWidth: 2)
-                                        .frame(width: personBox.width * geo.size.width, height: personBox.height * geo.size.height)
-                                        .position(x: personBox.midX * geo.size.width, y: (1 - personBox.midY) * geo.size.height)
-                                }
-                                if let clubBox = setup.clubHeadRegion {
-                                    Rectangle()
-                                        .stroke(Color.yellow, lineWidth: 2)
-                                        .frame(width: clubBox.width * geo.size.width, height: clubBox.height * geo.size.height)
-                                        .position(x: clubBox.midX * geo.size.width, y: (1 - clubBox.midY) * geo.size.height)
-                                }
-                                if let shaftLine = setup.clubShaftLine {
-                                    Path { path in
-                                        let start = CGPoint(x: shaftLine.start.x * geo.size.width, y: (1 - shaftLine.start.y) * geo.size.height)
-                                        let end = CGPoint(x: shaftLine.end.x * geo.size.width, y: (1 - shaftLine.end.y) * geo.size.height)
-                                        path.move(to: start)
-                                        path.addLine(to: end)
-                                    }
-                                    .stroke(Color.yellow, lineWidth: 2)
-                                }
-                                if let ballPos = setup.estimatedBallPosition {
-                                    Circle()
-                                        .fill(Color.white)
-                                        .frame(width: 10, height: 10)
-                                        .position(x: ballPos.x * geo.size.width, y: (1 - ballPos.y) * geo.size.height)
-                                }
-                            }
-
                             // End point marker (Landing)
                             if let end = endPoint {
                                 let visualEnd = uprightPoint(rawPoint: end, orientation: analyzer.sourceOrientation, in: geo.size)
                                 Circle()
                                     .fill(Color.red)
-                                    .frame(width: 6, height: 6)
+                                    .frame(width: 22, height: 22)
                                     .overlay(Circle().stroke(Color.white, lineWidth: 1))
                                     .position(visualEnd)
                                     .shadow(radius: 2)
+                                    .gesture(DragGesture().onChanged { value in
+                                        endPoint = pointFromDisplay(value.location, in: geo.size)
+                                    })
                             }
                         }
                     } else {
@@ -285,6 +262,11 @@ struct ContentView: View {
                                 .background(Color.accentColor.opacity(0.1))
                                 .clipShape(Circle())
                         }
+
+                        Button { stepFrame(-1) } label: {
+                            Image(systemName: "backward.frame.fill")
+                        }
+                        .accessibilityLabel("Previous frame")
                         
                         Slider(value: $currentPlayerTime, in: 0...max(videoDuration, 0.1)) { editing in
                             isScrubbing = editing
@@ -302,6 +284,11 @@ struct ContentView: View {
                             .font(.caption)
                             .monospacedDigit()
                             .foregroundStyle(.secondary)
+
+                        Button { stepFrame(1) } label: {
+                            Image(systemName: "forward.frame.fill")
+                        }
+                        .accessibilityLabel("Next frame")
                     }
                     .padding(.horizontal)
                 }
@@ -369,8 +356,16 @@ struct ContentView: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
             } else {
-                Text("Trajectory Ready.")
+                Text("Trajectory ready")
                 Spacer()
+                Button("Edit points") {
+                    isTrajectoryConfirmed = false
+                    analyzer.trajectories = []
+                    currentPlayerTime = startTime ?? 0
+                    player?.seek(to: CMTime(seconds: currentPlayerTime, preferredTimescale: 600))
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
                 Button("Reset") {
                     clearPoints()
                     withAnimation {
@@ -423,6 +418,18 @@ struct ContentView: View {
                 .buttonStyle(.plain)
                 
                 Text(String(format: "%.2f", deceleration))
+                    .monospacedDigit()
+                    .font(.subheadline)
+                    .frame(width: 45, alignment: .trailing)
+            }
+
+            HStack {
+                Text("Trail:")
+                    .font(.subheadline.bold())
+                    .frame(width: 70, alignment: .leading)
+                Slider(value: $trailLength, in: 0.15...1.0)
+                    .onChange(of: trailLength) { _, _ in saveProject() }
+                Text("\(Int(trailLength * 100))%")
                     .monospacedDigit()
                     .font(.subheadline)
                     .frame(width: 45, alignment: .trailing)
@@ -522,6 +529,19 @@ struct ContentView: View {
         }
     }
 
+    private func stepFrame(_ direction: Int) {
+        guard let player else { return }
+        player.pause()
+        isPlayingVideo = false
+        let step = Double(direction) / max(nominalFrameRate, 1)
+        currentPlayerTime = min(max(0, currentPlayerTime + step), videoDuration)
+        player.seek(
+            to: CMTime(seconds: currentPlayerTime, preferredTimescale: 600),
+            toleranceBefore: .zero,
+            toleranceAfter: .zero
+        )
+    }
+
     private func clearPoints() {
         startPoint = nil
         apexPoint = nil
@@ -561,6 +581,7 @@ struct ContentView: View {
             orientation: analyzer.sourceOrientation
         )
         analyzer.trajectories = [trajectory]
+        saveProject()
     }
 
     private func prepareVideo(url: URL) async {
@@ -569,10 +590,9 @@ struct ContentView: View {
         
         await MainActor.run {
             player?.pause()
+            clearPoints()
             player = nil
             analyzer.trajectories = []
-            analyzer.setupInfo = nil
-            clearPoints()
         }
 
         let asset = AVURLAsset(url: url)
@@ -587,31 +607,17 @@ struct ContentView: View {
             // while ensuring the ball hasn't been hit yet (which often happens by 50%).
             let setupTime = CMTimeMultiplyByFloat64(duration, multiplier: 0.15)
             let still = try? await TrajectoryAnalyzer.extractFrame(from: url, at: setupTime)
-            
-            // Run setup detection on the 15% frame
-            var setup = try? await SetupDetector.detectSetup(in: url, at: setupTime)
-            
-            // Failsafe: If hand-held camera shake ruined the 15% frame, retry on the first frame
-            if setup?.estimatedBallPosition == nil {
-                setup = try? await SetupDetector.detectSetup(in: url, at: .zero)
-            }
-            
-            // Absolute Failsafe: If the neural network completely fails to find the golfer, inject a default starting point
-            if setup == nil {
-                setup = SetupDetector.SetupInfo(personBoundingBox: nil, clubHeadRegion: nil, estimatedBallPosition: CGPoint(x: 0.5, y: 0.2), clubShaftLine: nil)
-            } else if setup?.estimatedBallPosition == nil {
-                setup?.estimatedBallPosition = CGPoint(x: 0.5, y: 0.2)
-            }
+            let loadedFrameRate = Double((try? await track.load(.nominalFrameRate)) ?? 30)
             
             await MainActor.run {
                 clearPoints() // Must be called FIRST, otherwise it deletes the trajectory we just generated!
                 
                 analyzer.sourceOrientation = orientation
                 analyzer.stillFrame = still
-                analyzer.setupInfo = setup
                 analyzer.trajectories = [] // Default to empty so the Manual tools show up!
                 
                 videoDuration = CMTimeGetSeconds(duration)
+                nominalFrameRate = loadedFrameRate > 0 ? loadedFrameRate : 30
                 
                 let newPlayer = AVPlayer(url: url)
                 let interval = CMTime(value: 1, timescale: 30) // 30fps update rate
@@ -634,6 +640,7 @@ struct ContentView: View {
                 
                 player = newPlayer
                 isPlayingVideo = false
+                preparedURL = url
             }
         } catch {
             print("Error preparing video: \(error)")
@@ -648,12 +655,61 @@ struct ContentView: View {
                 trajectories: displayedTrajectories,
                 orientation: analyzer.sourceOrientation,
                 deceleration: deceleration,
-                curveFactor: curveFactor
+                curveFactor: curveFactor,
+                trailLength: trailLength
             )
         }
     }
 
+    private func saveProject() {
+        guard let videoURL, let startPoint, let apexPoint, let endPoint,
+              let startTime, let endTime else { return }
+        let project = TracerProject(
+            videoFilename: videoURL.lastPathComponent,
+            startPoint: StoredPoint(startPoint),
+            apexPoint: StoredPoint(apexPoint),
+            endPoint: StoredPoint(endPoint),
+            startTime: startTime,
+            endTime: endTime,
+            apexTiming: deceleration,
+            curve: curveFactor,
+            trailLength: trailLength,
+            mirrored: false
+        )
+        do { try TracerProjectStore.save(project) }
+        catch { analyzer.errorMessage = "Could not save this editable trace: \(error.localizedDescription)" }
+    }
+
+    private func restoreProjectIfAvailable() async {
+        guard videoURL == nil else { return }
+        do {
+            guard let (project, url) = try TracerProjectStore.load() else { return }
+            await prepareVideo(url: url)
+            videoURL = url
+            startPoint = project.startPoint.cgPoint
+            apexPoint = project.apexPoint.cgPoint
+            endPoint = project.endPoint.cgPoint
+            startTime = project.startTime
+            endTime = project.endTime
+            deceleration = project.apexTiming
+            curveFactor = project.curve
+            trailLength = project.trailLength
+            isTrajectoryConfirmed = true
+            generateTrajectory()
+        } catch {
+            analyzer.errorMessage = "Could not reopen the last editable trace: \(error.localizedDescription)"
+        }
+    }
+
     // MARK: – Geometry Transformation Helpers
+
+    private func pointFromDisplay(_ location: CGPoint, in size: CGSize) -> CGPoint {
+        let normalized = CGPoint(
+            x: min(max(location.x / size.width, 0), 1),
+            y: min(max(1 - location.y / size.height, 0), 1)
+        )
+        return denormalizeTapPoint(normalized, orientation: analyzer.sourceOrientation)
+    }
 
     private func denormalizeTapPoint(_ tapPoint: CGPoint, orientation: CGImagePropertyOrientation) -> CGPoint {
         let rawX: CGFloat

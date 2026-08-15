@@ -17,7 +17,7 @@ final class TrajectoryPlaybackController: ObservableObject {
         self.player = player
         let interval = CMTime(value: 1, timescale: 60)
         timeObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
-            self?.currentTime = time
+            Task { @MainActor [weak self] in self?.currentTime = time }
         }
         endObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime,
@@ -70,6 +70,7 @@ struct AnimatedTrajectoryView: View {
     let aspectRatio: CGFloat
     let deceleration: Double
     let curveFactor: Double
+    let trailLength: Double
 
     @StateObject private var controller: TrajectoryPlaybackController
 
@@ -79,7 +80,8 @@ struct AnimatedTrajectoryView: View {
         orientation: CGImagePropertyOrientation,
         aspectRatio: CGFloat,
         deceleration: Double,
-        curveFactor: Double
+        curveFactor: Double,
+        trailLength: Double
     ) {
         self.videoURL = videoURL
         self.trajectories = trajectories
@@ -87,6 +89,7 @@ struct AnimatedTrajectoryView: View {
         self.aspectRatio = aspectRatio
         self.deceleration = deceleration
         self.curveFactor = curveFactor
+        self.trailLength = trailLength
         _controller = StateObject(wrappedValue: TrajectoryPlaybackController(url: videoURL))
     }
 
@@ -138,21 +141,13 @@ struct AnimatedTrajectoryView: View {
         size: CGSize,
         color: Color
     ) {
-        let start = CMTimeGetSeconds(trajectory.timeRange.start)
-        let end = CMTimeGetSeconds(trajectory.timeRange.end)
-        guard currentSeconds >= start else { return }
-
-        let linearProgress: Double = currentSeconds >= end
-            ? 1.0
-            : (currentSeconds - start) / max(end - start, 0.0001)
-            
-        let exponent = 1.5 + max(0.0, curveFactor)
-        let progress = 1.0 - pow(1.0 - linearProgress, exponent)
-
-        let totalPoints = trajectory.points.count
-        guard totalPoints > 0 else { return }
-        let visibleCount = max(1, min(totalPoints, Int(Double(totalPoints) * progress)))
-        let visiblePoints = trajectory.points.prefix(visibleCount)
+        guard let frame = TrajectoryRenderMath.frame(
+            at: currentSeconds,
+            trajectory: trajectory,
+            curve: curveFactor,
+            trailLength: trailLength
+        ) else { return }
+        let visiblePoints = trajectory.points[frame.pointRange]
 
         let cgPoints = visiblePoints.map { rawPoint in
             uprightPoint(rawX: rawPoint.x, rawY: rawPoint.y, size: size)
@@ -164,8 +159,7 @@ struct AnimatedTrajectoryView: View {
             let p1 = cgPoints[i - 1]
             let p2 = cgPoints[i]
             
-            let segmentProgress = Double(i) / Double(pointCount)
-            let alpha = segmentProgress * segmentProgress
+            let alpha = TrajectoryRenderMath.segmentAlpha(index: i, count: pointCount, globalAlpha: frame.globalAlpha)
             
             if alpha < 0.02 { continue }
             
@@ -173,7 +167,7 @@ struct AnimatedTrajectoryView: View {
             segmentPath.move(to: p1)
             segmentPath.addLine(to: p2)
             
-            let thickness = 2.0 + (5.0 * segmentProgress)
+            let thickness = TrajectoryRenderMath.segmentWidth(index: i, count: pointCount)
             
             context.stroke(segmentPath, with: .color(color.opacity(alpha * 0.4)), lineWidth: thickness * 3)
             context.stroke(segmentPath, with: .color(color.opacity(alpha)), lineWidth: thickness)
@@ -181,26 +175,15 @@ struct AnimatedTrajectoryView: View {
 
         if let lead = cgPoints.last {
             let dot = Path(ellipseIn: CGRect(x: lead.x - 5, y: lead.y - 5, width: 10, height: 10))
-            context.fill(dot, with: .color(color))
+            context.fill(dot, with: .color(color.opacity(frame.globalAlpha)))
         }
     }
 
     private func uprightPoint(rawX: CGFloat, rawY: CGFloat, size: CGSize) -> CGPoint {
-        let (uX, uY): (CGFloat, CGFloat)
-        switch orientation {
-        case .right:
-            uX = rawY
-            uY = 1 - rawX
-        case .left:
-            uX = 1 - rawY
-            uY = rawX
-        case .down:
-            uX = 1 - rawX
-            uY = 1 - rawY
-        default:
-            uX = rawX
-            uY = rawY
-        }
-        return CGPoint(x: uX * size.width, y: (1 - uY) * size.height)
+        TrajectoryRenderMath.displayPoint(
+            native: CGPoint(x: rawX, y: rawY),
+            orientation: orientation,
+            size: size
+        )
     }
 }
