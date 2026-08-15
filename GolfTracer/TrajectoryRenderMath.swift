@@ -48,7 +48,13 @@ enum TrajectoryRenderMath {
         return CGPoint(x: upright.x * size.width, y: (1 - upright.y) * size.height)
     }
 
-    static func segmentAlpha(index: Int, count: Int, globalAlpha: Double) -> Double {
+    static func segmentAlpha(
+        index: Int,
+        count: Int,
+        globalAlpha: Double,
+        trailLength: Double
+    ) -> Double {
+        if trailLength >= 0.999 { return globalAlpha }
         let progress = Double(index) / Double(max(count - 1, 1))
         return progress * progress * globalAlpha
     }

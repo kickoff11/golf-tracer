@@ -82,6 +82,22 @@ import Testing
     #expect(frame.globalAlpha == 1)
 }
 
+@Test func fullTrailIsSolidWhileShorterTrailsFade() {
+    let solidStart = TrajectoryRenderMath.segmentAlpha(
+        index: 1, count: 100, globalAlpha: 1, trailLength: 1
+    )
+    let solidEnd = TrajectoryRenderMath.segmentAlpha(
+        index: 99, count: 100, globalAlpha: 1, trailLength: 1
+    )
+    let fadedStart = TrajectoryRenderMath.segmentAlpha(
+        index: 1, count: 100, globalAlpha: 1, trailLength: 0.7
+    )
+
+    #expect(solidStart == 1)
+    #expect(solidEnd == 1)
+    #expect(fadedStart < solidStart)
+}
+
 private extension CGFloat {
     func isApproximatelyEqual(to other: CGFloat, tolerance: CGFloat = 0.000_001) -> Bool {
         abs(self - other) <= tolerance

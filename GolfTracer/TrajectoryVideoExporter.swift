@@ -143,7 +143,12 @@ final class TrajectoryVideoExporter: ObservableObject {
                     let p1 = pts[i - 1]
                     let p2 = pts[i]
                     
-                    let alpha = TrajectoryRenderMath.segmentAlpha(index: i, count: pointCount, globalAlpha: frame.globalAlpha)
+                    let alpha = TrajectoryRenderMath.segmentAlpha(
+                        index: i,
+                        count: pointCount,
+                        globalAlpha: frame.globalAlpha,
+                        trailLength: trailLength
+                    )
                     
                     if alpha < 0.02 { continue } // CULL invisible tail segments for massive speedup!
                     

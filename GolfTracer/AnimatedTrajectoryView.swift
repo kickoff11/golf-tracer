@@ -159,7 +159,12 @@ struct AnimatedTrajectoryView: View {
             let p1 = cgPoints[i - 1]
             let p2 = cgPoints[i]
             
-            let alpha = TrajectoryRenderMath.segmentAlpha(index: i, count: pointCount, globalAlpha: frame.globalAlpha)
+            let alpha = TrajectoryRenderMath.segmentAlpha(
+                index: i,
+                count: pointCount,
+                globalAlpha: frame.globalAlpha,
+                trailLength: trailLength
+            )
             
             if alpha < 0.02 { continue }
             
